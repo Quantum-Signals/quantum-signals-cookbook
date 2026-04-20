@@ -120,6 +120,8 @@ def main() -> None:
     logger.info("  QuantumSignals x IB Gateway Trader  ")
     logger.info(f"  Mode: {'DRY-RUN (simulated)' if settings.dry_run else 'LIVE (IB Gateway)'}")
     logger.info(f"  Strategy: {settings.strategy}")
+    if settings.strategy == "momentum":
+        logger.info(f"  Execution interval: {settings.execution_interval_minutes} min")
     logger.info("=" * 60)
 
     perf = PerformanceTracker()

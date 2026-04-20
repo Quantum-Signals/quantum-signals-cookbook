@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from dataclasses import dataclass, field
 
@@ -55,20 +56,36 @@ class Settings:
     close_on_exit: bool = True
     daily_start_capital: float = 100_000.0
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
+    execution_interval_minutes: int = 5
     symbol_map: dict[str, dict] = field(default_factory=lambda: dict(_DEFAULT_SYMBOL_MAP))
     position_sizes: dict[str, int] = field(default_factory=lambda: dict(_DEFAULT_POSITION_SIZES))
     sim_prices: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_SIM_PRICES))
     contract_multipliers: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_CONTRACT_MULTIPLIERS))
 
 
+def _parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="QuantumSignals Live Trader")
+    parser.add_argument(
+        "--execution-interval",
+        type=int,
+        default=None,
+        metavar="MINUTES",
+        help="Minutes between momentum execution decisions (default: 5)",
+    )
+    return parser.parse_args()
+
+
 def load_settings() -> Settings:
-    """Load settings from environment variables (and .env file)."""
+    """Load settings from environment variables, .env file, and CLI args."""
     load_dotenv()
+    cli = _parse_cli_args()
 
     raw_symbols = os.getenv("ALLOWED_SYMBOLS", "").strip()
     allowed: tuple[str, ...] = ()
     if raw_symbols:
         allowed = tuple(s.strip().upper() for s in raw_symbols.split(",") if s.strip())
+
+    interval = cli.execution_interval or int(os.getenv("EXECUTION_INTERVAL_MINUTES", "5"))
 
     return Settings(
         qs_api_key=os.environ["QUANTUMSIGNALS_API_KEY"],
@@ -82,4 +99,5 @@ def load_settings() -> Settings:
         close_on_exit=os.getenv("CLOSE_ON_EXIT", "true").lower() in ("true", "1", "yes"),
         daily_start_capital=float(os.getenv("DAILY_START_CAPITAL", "100000")),
         signal_queue_maxsize=int(os.getenv("SIGNAL_QUEUE_MAXSIZE", "0")),
+        execution_interval_minutes=interval,
     )
