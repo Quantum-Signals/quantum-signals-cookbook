@@ -104,8 +104,6 @@ class IBGateway(GatewayBase):
         logger.info(f"IB reqMktData for {sym}…")
         t0 = time.perf_counter()
 
-        # Cancel any stale subscription so IB sends a fresh data stream
-        self.ib.cancelMktData(contract)
         ticker = self.ib.reqMktData(contract)
 
         # Invalidate cached fields — ib_async reuses the Ticker object and old
@@ -152,7 +150,14 @@ class IBGateway(GatewayBase):
             f"Order placed  {action} {qty}x {contract.symbol}  "
             f"{'MKT' if self._settings.use_market_orders else f'LMT@{price}'}"
         )
-        self.ib.sleep(1)
+
+        _DONE = frozenset({"Filled", "Cancelled", "Inactive", "ApiCancelled", "ValidationError"})
+        deadline = time.perf_counter() + 5.0
+        while time.perf_counter() < deadline:
+            self.ib.sleep(0.25)
+            if trade.orderStatus.status in _DONE or trade.fills:
+                break
+
         return trade
 
     def get_account_summary(self) -> dict:

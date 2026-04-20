@@ -4,10 +4,8 @@ import queue
 import sys
 import threading
 import time
-
 from loguru import logger
 from quantumsignals.client import Client as QSClient
-
 from trader.config import Settings, load_settings
 from trader.gateways import create_gateway
 from trader.gateways.base import GatewayBase
@@ -160,8 +158,10 @@ def main() -> None:
 
     # ib_async: same thread as gw.connect() must run qualifyContracts / orders / account.
     report_interval_s = 60.0
+    tick_interval_s = 1.0
     poll_s = 0.05
     next_report_at = time.monotonic() + report_interval_s
+    next_tick_at = time.monotonic()
 
     logger.info("Bot running. Press Ctrl-C to stop.")
     try:
@@ -182,6 +182,14 @@ def main() -> None:
                 pass
 
             now = time.monotonic()
+
+            if now >= next_tick_at:
+                try:
+                    strategy.tick()
+                except Exception as exc:
+                    logger.exception(f"Strategy tick error: {exc}")
+                next_tick_at = now + tick_interval_s
+
             if now >= next_report_at:
                 report_once(gw, perf)
                 next_report_at = now + report_interval_s

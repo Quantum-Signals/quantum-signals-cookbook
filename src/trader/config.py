@@ -14,23 +14,28 @@ _DEFAULT_SYMBOL_MAP: dict[str, dict] = {
     "RTY":  {"symbol": "RTY",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
     "CL":   {"symbol": "CL",   "secType": "FUT", "exchange": "NYMEX", "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
     "GC":   {"symbol": "GC",   "secType": "FUT", "exchange": "COMEX", "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+    "MES":  {"symbol": "MES",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+    "MNQ":  {"symbol": "MNQ",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
     "AAPL": {"symbol": "AAPL", "secType": "STK", "exchange": "SMART", "currency": "USD"},
     "SPY":  {"symbol": "SPY",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
+    "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
 }
 
 _DEFAULT_POSITION_SIZES: dict[str, int] = {
     "ES": 1, "NQ": 1, "YM": 1, "RTY": 1,
-    "CL": 1, "GC": 1, "AAPL": 10, "SPY": 5,
+    "MES": 1, "MNQ": 1, "CL": 1, "GC": 1, "AAPL": 10, "SPY": 5, "QQQ": 5,
 }
 
 _DEFAULT_SIM_PRICES: dict[str, float] = {
     "ES": 5450.00, "NQ": 19200.00, "YM": 42500.00, "RTY": 2050.00,
-    "CL": 68.50, "GC": 2350.00, "AAPL": 218.50, "SPY": 545.00,
+    "MES": 5450.00, "MNQ": 19200.00,
+    "CL": 68.50, "GC": 2350.00, "AAPL": 218.50, "SPY": 545.00, "QQQ": 470.00,
 }
 
 _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
     "ES": 50.0, "NQ": 20.0, "YM": 5.0, "RTY": 50.0,
-    "CL": 1000.0, "GC": 100.0, "AAPL": 1.0, "SPY": 1.0,
+    "MES": 5.0, "MNQ": 2.0,
+    "CL": 1000.0, "GC": 100.0, "AAPL": 1.0, "SPY": 1.0, "QQQ": 1.0,
 }
 
 

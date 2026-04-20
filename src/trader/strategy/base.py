@@ -10,3 +10,6 @@ class StrategyBase(ABC):
     def handle_signal(self, signal: object) -> None:
         """React to a single QuantumSignals signal object."""
         ...
+
+    def tick(self) -> None:
+        """Called periodically from the main loop for time-driven work."""

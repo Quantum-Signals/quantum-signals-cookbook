@@ -13,29 +13,29 @@ from trader.strategy.base import StrategyBase
 
 _ET = ZoneInfo("America/New_York")
 
-_PRICE_COLLECT_START = dt_time(9, 15)
 _TRADING_START = dt_time(9, 45)
 _TRADING_END = dt_time(15, 30)
 _CLOSE_START = dt_time(15, 55)
 _CLOSE_END = dt_time(16, 0)
 _DECISION_INTERVAL = 5  # minutes
-_TOTAL_TRADING_MINUTES = 345  # 9:45 → 15:30
+
+# Signals arrive for futures symbols; we trade the correlated ETF.
+_SIGNAL_TO_TRADE: dict[str, str] = {
+    "ES": "SPY",
+    "NQ": "QQQ",
+}
 
 
 class SignalFollowerStrategy(StrategyBase):
-    """Intraday strategy that accumulates positions following QS signals and
-    flattens everything before the close.
+    """Intraday strategy that trades 1 share of the mapped ETF (SPY, QQQ)
+    for every incoming signal and flattens everything before the close.
 
-    **Price collection** — 9:15 AM to 9:45 AM ET
-        Collects (delayed) market prices for each symbol.  With 15-min delayed
-        data this captures the ~9:00–9:30 open range.  The average becomes
-        ``day_open_price`` and drives position sizing for the day.
+    Signals arrive for ES / NQ but orders are placed on SPY / QQQ.
 
     **Trading window** — 9:45 AM to 3:30 PM ET
         At every 5-minute boundary the latest QS signal sets the *active
-        decision* (UP → long, DOWN → short).  Each minute, ``per_minute_qty``
-        is added to a fractional accumulator; when it reaches ≥ 1 contract an
-        order is placed.
+        decision* (UP → long, DOWN → short).  Each signal minute, 1 share
+        is traded in the active direction.
 
     **Close window** — 3:55 PM to 4:00 PM ET
         All accumulated positions are flattened.
@@ -55,24 +55,18 @@ class SignalFollowerStrategy(StrategyBase):
         self._settings = settings
 
         self._allowed: set[str] = set(settings.allowed_symbols) if settings.allowed_symbols else set()
-        self._multipliers = settings.contract_multipliers
 
         self._active_decision: dict[str, Signal] = {}
 
-        # Net signed quantity and weighted cost accumulated during the day.
+        # Net signed quantity and weighted cost accumulated during the day
+        # (keyed by signal symbol, e.g. "ES", "NQ").
         self._net_qty: dict[str, int] = {}
         self._total_cost: dict[str, float] = {}
 
         self._current_date: date | None = None
         self._pre_market_done: bool = False
+        self._close_window_done: bool = False
         self._daily_pnl: float = 0.0
-
-        # Dynamic position sizing (computed once per day at 9:45)
-        self._collected_prices: dict[str, list[float]] = {}
-        self._day_open_price: dict[str, float] = {}
-        self._per_minute_qty: dict[str, float] = {}
-        self._qty_accumulator: dict[str, float] = {}
-        self._sizing_ready: bool = False
 
     # ------------------------------------------------------------------
     # Position sync — close stale positions at startup
@@ -116,19 +110,10 @@ class SignalFollowerStrategy(StrategyBase):
             self._flatten(sym)
             return
 
-        # ---- price collection: 9:15 – 9:45 ----
-        if _PRICE_COLLECT_START <= et_time < _TRADING_START:
-            self._collect_price(sym)
-            return
-
         # ---- outside trading hours ----
         if et_time < _TRADING_START or et_time > _TRADING_END:
             logger.debug(f"  -> Outside trading window ({et_time}) — skipping")
             return
-
-        # ---- compute sizing once per day at first trading signal ----
-        if not self._sizing_ready:
-            self._compute_sizing()
 
         # ---- 5-minute decision point ----
         if et_dt.minute % _DECISION_INTERVAL == 0:
@@ -152,6 +137,28 @@ class SignalFollowerStrategy(StrategyBase):
         self._open_incremental(sym, decision)
 
     # ------------------------------------------------------------------
+    # Time-driven close window — runs every tick, independent of signals
+    # ------------------------------------------------------------------
+    def tick(self) -> None:
+        if self._close_window_done or self._current_date is None:
+            return
+
+        now_et = datetime.now(_ET)
+        if now_et.date() != self._current_date:
+            return
+
+        et_time = now_et.time()
+        if not (_CLOSE_START <= et_time <= _CLOSE_END):
+            return
+
+        syms = [s for s, q in self._net_qty.items() if q != 0]
+        if syms:
+            logger.info(f"Close window ({et_time:%H:%M}) — flattening {len(syms)} position(s)")
+            for sym in syms:
+                self._flatten(sym)
+        self._close_window_done = True
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
     def _reset_day(self, new_date: date) -> None:
@@ -164,18 +171,10 @@ class SignalFollowerStrategy(StrategyBase):
         self._total_cost.clear()
         self._daily_pnl = 0.0
         self._pre_market_done = False
+        self._close_window_done = False
         self._current_date = new_date
 
-        self._collected_prices.clear()
-        self._day_open_price.clear()
-        self._per_minute_qty.clear()
-        self._qty_accumulator.clear()
-        self._sizing_ready = False
-
-        logger.info(
-            f"New trading day: {new_date}  "
-            f"(starting capital: ${self._settings.daily_start_capital:,.0f})"
-        )
+        logger.info(f"New trading day: {new_date}")
 
     def _log_daily_summary(self, day: date, capital: float) -> None:
         ret = self._daily_pnl / capital if capital else 0.0
@@ -186,60 +185,6 @@ class SignalFollowerStrategy(StrategyBase):
             f"PnL=${self._daily_pnl:+,.2f}  Return={ret:+.2%}"
         )
         logger.info("=" * 60)
-
-    # ------------------------------------------------------------------
-    # Price collection & sizing
-    # ------------------------------------------------------------------
-    def _collect_price(self, sym: str) -> None:
-        """Fetch the current (delayed) price and store it for open-price averaging."""
-        contract = self.gw.resolve_contract(sym)
-        if contract is None:
-            return
-        price = self.gw.get_last_price(contract)
-        if price is not None:
-            self._collected_prices.setdefault(sym, []).append(price)
-            logger.info(f"  -> Collected price for {sym}: {price:.2f}  (n={len(self._collected_prices[sym])})")
-        else:
-            logger.warning(f"  -> Could not get price for {sym} during collection window")
-
-    def _compute_sizing(self) -> None:
-        """Derive per-minute contract quantities from collected open prices."""
-        cap = self._settings.daily_start_capital
-        symbols = self._allowed or set(self._settings.symbol_map.keys())
-
-        logger.info("-" * 60)
-        logger.info("POSITION SIZING")
-
-        for sym in symbols:
-            prices = self._collected_prices.get(sym, [])
-
-            if prices:
-                avg = sum(prices) / len(prices)
-            else:
-                logger.warning(f"  {sym}: no prices collected — requesting now")
-                contract = self.gw.resolve_contract(sym)
-                if contract is None:
-                    continue
-                p = self.gw.get_last_price(contract)
-                if p is None:
-                    logger.error(f"  {sym}: still no price — cannot size, skipping symbol")
-                    continue
-                avg = p
-
-            self._day_open_price[sym] = avg
-            total = cap / avg
-            per_min = total / _TOTAL_TRADING_MINUTES
-            self._per_minute_qty[sym] = per_min
-
-            logger.info(
-                f"  {sym}:  open_price={avg:,.2f}  "
-                f"total_contracts={total:,.2f}  "
-                f"per_minute={per_min:.4f}  "
-                f"(~1 contract every {1 / per_min:.0f} min)"
-            )
-
-        logger.info("-" * 60)
-        self._sizing_ready = True
 
     # ------------------------------------------------------------------
     # Pre-market / stale-position cleanup
@@ -269,54 +214,40 @@ class SignalFollowerStrategy(StrategyBase):
             logger.info(f"  -> Closed stale {label} {abs(qty)}x {sym}")
 
     # ------------------------------------------------------------------
-    # Order placement with accumulator-based sizing
+    # Order placement — 1 share per signal
     # ------------------------------------------------------------------
     def _open_incremental(self, sym: str, direction: Signal) -> None:
-        """Accumulate fractional qty; trade when it reaches a whole contract."""
-        per_min = self._per_minute_qty.get(sym)
-        if per_min is None or per_min <= 0:
-            logger.debug(f"  -> No sizing for {sym} — skipping")
-            return
-
-        self._qty_accumulator[sym] = self._qty_accumulator.get(sym, 0.0) + per_min
-        trade_qty = int(self._qty_accumulator[sym])
-
-        if trade_qty < 1:
-            logger.debug(
-                f"  -> {sym} accumulator={self._qty_accumulator[sym]:.3f} "
-                f"(< 1 contract) — waiting"
-            )
-            return
-
-        self._qty_accumulator[sym] -= trade_qty
-
-        contract = self.gw.resolve_contract(sym)
+        """Trade 1 share on the mapped ETF for each signal."""
+        trade_sym = _SIGNAL_TO_TRADE.get(sym, sym)
+        contract = self.gw.resolve_contract(trade_sym)
         if contract is None:
-            logger.warning(f"  -> No tradable contract for {sym} — skipping")
-            self._qty_accumulator[sym] += trade_qty
+            logger.warning(f"  -> No tradable contract for {trade_sym} — skipping")
             return
 
         action = "BUY" if direction == Signal.UP else "SELL"
 
-        trade = self.gw.place_order(contract, action, trade_qty)
+        trade = self.gw.place_order(contract, action, 1)
         if trade is None:
-            self._qty_accumulator[sym] += trade_qty
             return
+
+        signed = 1 if action == "BUY" else -1
+        self._net_qty[sym] = self._net_qty.get(sym, 0) + signed
 
         fill_price = _extract_fill_price(trade)
         if fill_price is None:
             fill_price = self.gw.get_last_price(contract)
         if fill_price is None:
-            logger.warning(f"  -> No fill price for {action} {trade_qty}x {sym}")
+            logger.warning(
+                f"  -> {action} 1x {trade_sym} — fill price unknown, "
+                f"position tracked (net: {self._net_qty[sym]:+d})"
+            )
             return
 
-        signed = trade_qty if action == "BUY" else -trade_qty
-        self._net_qty[sym] = self._net_qty.get(sym, 0) + signed
         self._total_cost[sym] = self._total_cost.get(sym, 0.0) + signed * fill_price
 
         logger.info(
-            f"  -> {action} {trade_qty}x {sym} @ {fill_price:.2f}  "
-            f"(net: {self._net_qty[sym]:+d}  accum: {self._qty_accumulator[sym]:.3f})"
+            f"  -> {action} 1x {trade_sym} @ {fill_price:.2f}  "
+            f"(net: {self._net_qty[sym]:+d})"
         )
 
     def _flatten(self, sym: str) -> None:
@@ -325,9 +256,10 @@ class SignalFollowerStrategy(StrategyBase):
         if net == 0:
             return
 
-        contract = self.gw.resolve_contract(sym)
+        trade_sym = _SIGNAL_TO_TRADE.get(sym, sym)
+        contract = self.gw.resolve_contract(trade_sym)
         if contract is None:
-            logger.warning(f"  -> Cannot close {sym} — no tradable contract")
+            logger.warning(f"  -> Cannot close {trade_sym} — no tradable contract")
             return
 
         action = "SELL" if net > 0 else "BUY"
@@ -337,26 +269,28 @@ class SignalFollowerStrategy(StrategyBase):
         if trade is None:
             return
 
+        total_cost = self._total_cost.get(sym, 0.0)
+
+        self._net_qty[sym] = 0
+        self._total_cost[sym] = 0.0
+        self._active_decision.pop(sym, None)
+
         fill_price = _extract_fill_price(trade)
         if fill_price is None:
             fill_price = self.gw.get_last_price(contract)
         if fill_price is None:
-            logger.warning(f"  -> No fill price closing {sym}")
+            logger.warning(f"  -> No fill price closing {trade_sym} — PnL not recorded")
             return
 
-        total_cost = self._total_cost.get(sym, 0.0)
-        point_pnl = net * fill_price - total_cost
-        multiplier = self._multipliers.get(sym, 1.0)
-        dollar_pnl = point_pnl * multiplier
+        dollar_pnl = net * fill_price - total_cost
 
         direction = Signal.UP if net > 0 else Signal.DOWN
         self.perf.record_close(sym, dollar_pnl, direction)
         self._daily_pnl += dollar_pnl
 
         logger.info(
-            f"  -> FLATTEN {'LONG' if net > 0 else 'SHORT'} {abs_qty}x {sym} "
-            f"@ {fill_price:.2f}  point_pnl={point_pnl:+.2f}  "
-            f"x{multiplier:.0f}  $PnL={dollar_pnl:+,.2f}"
+            f"  -> FLATTEN {'LONG' if net > 0 else 'SHORT'} {abs_qty}x {trade_sym} "
+            f"@ {fill_price:.2f}  $PnL={dollar_pnl:+,.2f}"
         )
         cap = self._settings.daily_start_capital
         logger.info(
@@ -364,10 +298,6 @@ class SignalFollowerStrategy(StrategyBase):
             f"({self._daily_pnl / cap:+.2%} on ${cap:,.0f})  |  "
             f"{self.perf.summary()}"
         )
-
-        self._net_qty[sym] = 0
-        self._total_cost[sym] = 0.0
-        self._active_decision.pop(sym, None)
 
 
 # ------------------------------------------------------------------
