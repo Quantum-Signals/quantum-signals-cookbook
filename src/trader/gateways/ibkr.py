@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 from typing import Optional
 
@@ -19,6 +20,10 @@ class IBGateway(GatewayBase):
         self._settings = settings
         self.ib = IB()
         self._contract_cache: dict[str, object] = {}
+        # Set when IBKR reports a competing live session (error 10197); cleared
+        # at the start of each get_last_price call so recovery is automatic once
+        # the competing session is closed.
+        self._mkt_abort = threading.Event()
 
     def connect(self) -> None:
         from ib_async import util
@@ -28,6 +33,14 @@ class IBGateway(GatewayBase):
         def _on_ib_error(reqId: int, errorCode: int, errorString: str, contract: object) -> None:
             if errorCode in (2104, 2106, 2107, 2108, 2158, 2119, 300, 354, 10167):
                 logger.debug(f"IB notice {errorCode}: {errorString}")
+            elif errorCode == 10197:
+                self._mkt_abort.set()
+                logger.error(
+                    "IB error 10197: Competing TWS/IB Gateway session detected — "
+                    "market data is blocked for this API connection. "
+                    "Close the other TWS or IB Gateway session on this account "
+                    "(check other machines/IPs), then restart the bot."
+                )
             else:
                 logger.warning(f"IB error {errorCode} reqId={reqId}: {errorString} contract={contract}")
 
@@ -104,30 +117,58 @@ class IBGateway(GatewayBase):
         logger.info(f"IB reqMktData for {sym}…")
         t0 = time.perf_counter()
 
-        ticker = self.ib.reqMktData(contract)
-
-        # Invalidate cached fields — ib_async reuses the Ticker object and old
-        # values would satisfy the poll instantly, giving a stale price.
-        _nan = float("nan")
-        ticker.last = _nan
-        ticker.close = _nan
-        ticker.bid = _nan
-        ticker.ask = _nan
+        # snapshot=True requests a one-shot quote; IBKR auto-cancels the
+        # subscription once the packet arrives, which avoids the stale-cache
+        # problem that plagued the old streaming approach.
+        self._mkt_abort.clear()
+        ticker = self.ib.reqMktData(contract, snapshot=True)
 
         price = None
-        deadline = time.perf_counter() + 4.0
+        deadline = time.perf_counter() + 8.0
         while time.perf_counter() < deadline:
             self.ib.sleep(0.2)
+            if self._mkt_abort.is_set():
+                logger.debug(f"Aborting market data wait for {sym} (competing session)")
+                break
             price = self._best_price(ticker)
             if price is not None:
                 break
 
-        self.ib.cancelMktData(contract)
         elapsed = time.perf_counter() - t0
         logger.info(f"IB market data for {sym} done in {elapsed:.2f}s (price={price!r})")
+
         if price is None:
-            logger.warning(f"No usable price for {sym} — check market data subscription or market hours")
+            logger.warning(f"No usable price for {sym} — trying historical data fallback")
+            price = self._price_from_history(contract, sym)
+            if price is None:
+                logger.warning(f"No usable price for {sym} — check market data subscription or market hours")
+
         return price
+
+    def _price_from_history(self, contract: object, sym: str) -> Optional[float]:
+        """Fallback: pull the last 1-min bar close via reqHistoricalData.
+
+        Works during and outside regular trading hours, and does not require
+        a streaming market-data subscription.
+        """
+        try:
+            bars = self.ib.reqHistoricalData(
+                contract,
+                endDateTime="",
+                durationStr="1 D",
+                barSizeSetting="1 min",
+                whatToShow="TRADES",
+                useRTH=False,
+                formatDate=1,
+            )
+            if bars:
+                price = self._finite(bars[-1].close)
+                if price is not None:
+                    logger.info(f"Historical fallback price for {sym}: {price}")
+                    return price
+        except Exception as exc:
+            logger.debug(f"Historical data fallback failed for {sym}: {exc}")
+        return None
 
     def place_order(
         self,
