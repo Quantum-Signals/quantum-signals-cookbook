@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
@@ -64,6 +65,16 @@ class Settings:
 
 
 def _parse_cli_args() -> argparse.Namespace:
+    """Parse our CLI flags. Skip entirely under Jupyter: kernels inject argv (e.g. -f …json)."""
+    default = argparse.Namespace(execution_interval=None)
+    argv0 = os.path.basename(sys.argv[0]).lower() if sys.argv else ""
+    if (
+        os.environ.get("JPY_PARENT_PID")
+        or "ipykernel" in sys.modules
+        or "ipykernel" in argv0
+    ):
+        return default
+
     parser = argparse.ArgumentParser(description="QuantumSignals Live Trader")
     parser.add_argument(
         "--execution-interval",
@@ -72,7 +83,8 @@ def _parse_cli_args() -> argparse.Namespace:
         metavar="MINUTES",
         help="Minutes between momentum execution decisions (default: 5)",
     )
-    return parser.parse_args()
+    args, _unknown = parser.parse_known_args(args=sys.argv[1:])
+    return args
 
 
 def load_settings() -> Settings:

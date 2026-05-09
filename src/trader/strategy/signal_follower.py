@@ -17,7 +17,6 @@ _TRADING_START = dt_time(9, 45)
 _TRADING_END = dt_time(15, 30)
 _CLOSE_START = dt_time(15, 55)
 _CLOSE_END = dt_time(16, 0)
-_DECISION_INTERVAL = 5  # minutes
 
 # Signals arrive for futures symbols; we trade the correlated ETF.
 _SIGNAL_TO_TRADE: dict[str, str] = {
@@ -33,9 +32,10 @@ class SignalFollowerStrategy(StrategyBase):
     Signals arrive for ES / NQ but orders are placed on SPY / QQQ.
 
     **Trading window** — 9:45 AM to 3:30 PM ET
-        At every 5-minute boundary the latest QS signal sets the *active
-        decision* (UP → long, DOWN → short).  Each signal minute, 1 share
-        is traded in the active direction.
+        At every N-minute boundary (configurable via execution_interval_minutes,
+        default 5) the latest QS signal sets the *active decision* (UP → long,
+        DOWN → short).  Each signal minute, 1 share is traded in the active
+        direction.
 
     **Close window** — 3:55 PM to 4:00 PM ET
         All accumulated positions are flattened.
@@ -55,6 +55,7 @@ class SignalFollowerStrategy(StrategyBase):
         self._settings = settings
 
         self._allowed: set[str] = set(settings.allowed_symbols) if settings.allowed_symbols else set()
+        self._decision_interval = settings.execution_interval_minutes
 
         self._active_decision: dict[str, Signal] = {}
 
@@ -115,17 +116,17 @@ class SignalFollowerStrategy(StrategyBase):
             logger.debug(f"  -> Outside trading window ({et_time}) — skipping")
             return
 
-        # ---- 5-minute decision point ----
-        if et_dt.minute % _DECISION_INTERVAL == 0:
+        # ---- N-minute decision point (configurable interval) ----
+        if et_dt.minute % self._decision_interval == 0:
             if sig == Signal.UP:
                 self._active_decision[sym] = Signal.UP
-                logger.info(f"  -> Decision: {sym} = LONG for next {_DECISION_INTERVAL}min")
+                logger.info(f"  -> Decision: {sym} = LONG for next {self._decision_interval}min")
             elif sig == Signal.DOWN:
                 self._active_decision[sym] = Signal.DOWN
-                logger.info(f"  -> Decision: {sym} = SHORT for next {_DECISION_INTERVAL}min")
+                logger.info(f"  -> Decision: {sym} = SHORT for next {self._decision_interval}min")
             else:
                 self._active_decision.pop(sym, None)
-                logger.info(f"  -> Decision: {sym} = STABLE — pause for next {_DECISION_INTERVAL}min")
+                logger.info(f"  -> Decision: {sym} = STABLE — pause for next {self._decision_interval}min")
                 return
 
         # ---- execute active decision ----

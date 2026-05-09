@@ -35,6 +35,10 @@ PREREQUISITES
      IB_CLIENT_ID=1
      IB_MARKET_DATA_TYPE=4 # 1=live, 3=delayed, 4=delayed-frozen (free)
      ALLOWED_SYMBOLS=ES,NQ # comma-separated; leave blank for all symbols
+     EXECUTION_INTERVAL_MINUTES=5  # trading frequency in minutes (default: 5)
+
+4. CLI override for trading frequency:
+     uv run python scripts/tutorial.py --execution-interval 10
 """
 
 from __future__ import annotations
@@ -99,6 +103,7 @@ def step1_load_config() -> Settings:
     log_step(f"Market data   : type {settings.ib_market_data_type}"
              " (4=delayed-frozen, 1=live)")
     log_step(f"Strategy      : {settings.strategy}")
+    log_step(f"Exec interval : {settings.execution_interval_minutes} minutes")
     log_step(f"Allowed syms  : {', '.join(settings.allowed_symbols) or '(all)'}")
 
     return settings
