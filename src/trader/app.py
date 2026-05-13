@@ -26,7 +26,7 @@ def _setup_logging() -> None:
     logger.add(
         sys.stderr,
         format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
-        level="DEBUG",
+        level="INFO",
     )
     logger.add(
         "logs/trader_{time:YYYY-MM-DD}.log",
@@ -116,9 +116,14 @@ def main() -> None:
 
     settings = load_settings()
 
+    if settings.dry_run:
+        broker_label = "DRY-RUN (simulated)"
+    else:
+        broker_label = f"LIVE ({settings.broker.upper()})"
+
     logger.info("=" * 60)
-    logger.info("  QuantumSignals x IB Gateway Trader  ")
-    logger.info(f"  Mode: {'DRY-RUN (simulated)' if settings.dry_run else 'LIVE (IB Gateway)'}")
+    logger.info("  QuantumSignals Live Trader  ")
+    logger.info(f"  Broker: {broker_label}")
     logger.info(f"  Strategy: {settings.strategy}")
     logger.info(f"  Execution interval: {settings.execution_interval_minutes} min")
     logger.info("=" * 60)

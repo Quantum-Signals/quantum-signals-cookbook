@@ -45,10 +45,17 @@ _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
 class Settings:
     qs_api_key: str
     dry_run: bool = True
+    # Broker selection: "ibkr" (default) or "alpaca"
+    broker: str = "alpaca"
+    # IBKR connection settings
     ib_host: str = "127.0.0.1"
     ib_port: int = 4002
     ib_client_id: int = 1
     ib_market_data_type: int = 4  # 1=live, 3=delayed, 4=delayed-frozen
+    # Alpaca credentials
+    alpaca_api_key: str = ""
+    alpaca_secret_key: str = ""
+    alpaca_paper: bool = True
     trade_cooldown_seconds: int = 60
     use_market_orders: bool = True
     max_stream_retries: int = 5
@@ -102,10 +109,14 @@ def load_settings() -> Settings:
     return Settings(
         qs_api_key=os.environ["QUANTUMSIGNALS_API_KEY"],
         dry_run=os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes"),
+        broker=os.getenv("BROKER", "alpaca").lower(),
         ib_host=os.getenv("IB_HOST", "127.0.0.1"),
         ib_port=int(os.getenv("IB_PORT", "4002")),
         ib_client_id=int(os.getenv("IB_CLIENT_ID", "1")),
         ib_market_data_type=int(os.getenv("IB_MARKET_DATA_TYPE", "4")),
+        alpaca_api_key=os.getenv("ALPACA_API_KEY", ""),
+        alpaca_secret_key=os.getenv("ALPACA_SECRET_KEY", ""),
+        alpaca_paper=os.getenv("ALPACA_PAPER", "true").lower() in ("true", "1", "yes"),
         strategy=os.getenv("STRATEGY", "momentum").lower(),
         allowed_symbols=allowed,
         close_on_exit=os.getenv("CLOSE_ON_EXIT", "true").lower() in ("true", "1", "yes"),

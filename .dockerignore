@@ -1,0 +1,24 @@
+.git/
+.venv/
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Notebooks and scripts not needed at runtime
+*.ipynb
+scripts/
+tests/
+
+# Logs (mounted as a volume at runtime)
+logs/
+
+# Secrets — never bake into the image
+.env
+
+# Editor / OS noise
+.DS_Store
+.cursorrules
+QS documentation.md

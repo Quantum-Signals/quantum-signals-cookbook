@@ -10,27 +10,39 @@ from trader.models import PerformanceTracker, Signal
 from trader.strategy.base import StrategyBase
 
 _TRADING_MINUTES_PER_DAY = 390  # 6.5 hours for US equities
-_TARGET_DAILY_NOTIONAL = 100_000.0
 
 _SIGNAL_TO_TRADE: dict[str, str] = {
     "ES": "SPY",
     "NQ": "QQQ",
 }
 
+# Reverse map: ETF ticker → QS signal symbol (used by sync_positions)
+_TRADE_TO_SIGNAL: dict[str, str] = {v: k for k, v in _SIGNAL_TO_TRADE.items()}
 
-def _compute_order_qty(interval_minutes: int, price: float) -> int:
-    """Return the per-execution order size so daily notional ≈ $100k.
 
-    With a 5-min interval there are 78 executions/day.  At price $545
-    (SPY) that gives qty=round(100_000 / (78*545)) ≈ 2.  If the interval
-    doubles to 10 min (39 execs), qty doubles to keep the daily spend
-    constant.
+def _compute_order_qty(
+    interval_minutes: int,
+    price: float,
+    target_daily_notional: float,
+    use_fractional: bool = False,
+) -> float:
+    """Return the per-execution order size so a symbol's daily notional ≈ target_daily_notional.
+
+    With a 5-min interval there are 78 executions/day.  At price $545 (SPY)
+    and a $50k per-symbol budget:
+      fractional (Alpaca): qty = 50_000 / (78 × 545) ≈ 1.1776 shares
+      integer    (IBKR):   qty = round(1.1776) = 1 share
+
+    Doubling the interval halves executions/day and doubles qty, keeping
+    daily notional constant.
     """
     executions_per_day = _TRADING_MINUTES_PER_DAY // interval_minutes
     if executions_per_day <= 0 or price <= 0:
-        return 1
-    raw = _TARGET_DAILY_NOTIONAL / (executions_per_day * price)
-    return max(1, round(raw))
+        return 0.0001 if use_fractional else 1.0
+    raw = target_daily_notional / (executions_per_day * price)
+    if use_fractional:
+        return round(raw, 4)  # Alpaca accepts up to 9 d.p.; 4 is plenty
+    return float(max(1, round(raw)))
 
 
 class MomentumStrategy(StrategyBase):
@@ -39,11 +51,16 @@ class MomentumStrategy(StrategyBase):
     user-configurable interval (default 5 minutes).
 
     At each interval the latest signal adjusts the net position by
-    *qty* units (scaled so daily notional ≈ $100 000):
+    *qty* units sized so each symbol's daily notional ≈ $50 000
+    (≈ $100 000 total across ES→SPY and NQ→QQQ):
 
         UP     → BUY  qty  (net position += qty)
         DOWN   → SELL qty  (net position -= qty)
         STABLE → hold      (no trade, timer still resets)
+
+    When the broker is Alpaca, fractional share quantities are computed so
+    each order matches the per-execution budget exactly.  For other brokers
+    quantities are rounded to the nearest whole share (min 1).
 
     Positions accumulate over time.
     """
@@ -60,17 +77,31 @@ class MomentumStrategy(StrategyBase):
 
         self._interval_minutes = settings.execution_interval_minutes
         self._interval_s = self._interval_minutes * 60
+        self._use_fractional = settings.broker == "alpaca"
 
         self._allowed: set[str] = set(settings.allowed_symbols) if settings.allowed_symbols else set()
 
-        self._net_qty: dict[str, int] = {}
+        # Active tradeable symbols = those in _SIGNAL_TO_TRADE that pass the allow-list.
+        active_symbols = (
+            [s for s in _SIGNAL_TO_TRADE if s in self._allowed]
+            if self._allowed
+            else list(_SIGNAL_TO_TRADE)
+        )
+        n_symbols = max(len(active_symbols), 1)
+        self._target_daily_notional_per_symbol = settings.daily_start_capital / n_symbols
+
+        self._net_qty: dict[str, float] = {}
         self._total_cost: dict[str, float] = {}
         self._last_exec_time: dict[str, float] = {}
 
+        execs_per_day = _TRADING_MINUTES_PER_DAY // self._interval_minutes
         logger.info(
             f"MomentumStrategy: interval={self._interval_minutes}min  "
-            f"execs/day={_TRADING_MINUTES_PER_DAY // self._interval_minutes}  "
-            f"target_daily_notional=${_TARGET_DAILY_NOTIONAL:,.0f}"
+            f"execs/day={execs_per_day}  "
+            f"symbols={n_symbols}  "
+            f"target_per_symbol=${self._target_daily_notional_per_symbol:,.0f}  "
+            f"total_target=${settings.daily_start_capital:,.0f}  "
+            f"fractional={'yes (Alpaca)' if self._use_fractional else 'no (integer)'}"
         )
 
     # ------------------------------------------------------------------
@@ -80,22 +111,25 @@ class MomentumStrategy(StrategyBase):
         """Seed the bot's position state from existing broker positions."""
         pos_list = self.gw.get_positions_for_sync()
         for p in pos_list:
-            sym = p["symbol"]
-            qty = int(p["qty"])
+            etf_sym = p["symbol"]
+            # Internal state is keyed by QS signal symbol ("ES"/"NQ"), not the
+            # ETF ticker ("SPY"/"QQQ").  Map back so handle_signal() finds it.
+            sig_sym = _TRADE_TO_SIGNAL.get(etf_sym, etf_sym)
+            qty = float(p["qty"])
             avg_price = p["avg_price"]
             if qty == 0:
                 continue
-            self._net_qty[sym] = qty
-            self._total_cost[sym] = qty * avg_price
+            self._net_qty[sig_sym] = qty
+            self._total_cost[sig_sym] = qty * avg_price
             label = "LONG" if qty > 0 else "SHORT"
-            logger.info(f"  Synced {label} {abs(qty)}x {sym} @ {avg_price:.2f} from broker")
+            logger.info(f"  Synced {label} {_fmt_qty(abs(qty))}x {etf_sym} @ {avg_price:.2f} from broker")
         if pos_list:
             logger.info(f"Synced {len(pos_list)} existing position(s) from broker")
         else:
             logger.info("No existing positions at broker")
 
     # ------------------------------------------------------------------
-    # Signal handler — gated to one execution per 5 minutes per symbol
+    # Signal handler — gated to one execution per N minutes per symbol
     # ------------------------------------------------------------------
     def handle_signal(self, signal: object) -> None:
         sym = signal.symbol
@@ -127,7 +161,8 @@ class MomentumStrategy(StrategyBase):
             return
 
         if sig == Signal.STABLE:
-            logger.info(f"  -> STABLE — holding {sym} (net: {self._net_qty.get(sym, 0):+d})")
+            net = self._net_qty.get(sym, 0.0)
+            logger.info(f"  -> STABLE — holding {sym} (net: {_fmt_signed_qty(net)})")
             self._last_exec_time[sym] = now
             return
 
@@ -151,15 +186,19 @@ class MomentumStrategy(StrategyBase):
             logger.warning(f"  -> No market data for {trade_sym} — skipping")
             return
 
-        qty = _compute_order_qty(self._interval_minutes, price)
+        qty = _compute_order_qty(
+            self._interval_minutes, price,
+            self._target_daily_notional_per_symbol,
+            self._use_fractional,
+        )
         action = "BUY" if sig == Signal.UP else "SELL"
         signed_qty = qty if sig == Signal.UP else -qty
 
-        prev_net = self._net_qty.get(sym, 0)
+        prev_net = self._net_qty.get(sym, 0.0)
         new_net = prev_net + signed_qty
 
         crosses_zero = prev_net != 0 and (prev_net > 0) != (new_net > 0) and new_net != 0
-        goes_flat = prev_net != 0 and new_net == 0
+        goes_flat = prev_net != 0 and abs(new_net) < 1e-9
 
         trade = self.gw.place_order(contract, action, qty, price)
         if trade is None:
@@ -173,19 +212,20 @@ class MomentumStrategy(StrategyBase):
                 self._net_qty[sym] = new_net
                 self._total_cost[sym] = new_net * price
             else:
-                self._net_qty[sym] = 0
+                self._net_qty[sym] = 0.0
                 self._total_cost[sym] = 0.0
         else:
             self._net_qty[sym] = new_net
             self._total_cost[sym] = self._total_cost.get(sym, 0.0) + signed_qty * price
 
         logger.info(
-            f"  -> {action} {qty}x {trade_sym} @ {price:.2f}  "
-            f"[signal={sym}]  (net: {prev_net:+d} -> {self._net_qty[sym]:+d})"
+            f"  -> {action} {_fmt_qty(qty)}x {trade_sym} @ {price:.2f}  "
+            f"notional=${qty * price:,.2f}  [signal={sym}]  "
+            f"(net: {_fmt_signed_qty(prev_net)} → {_fmt_signed_qty(self._net_qty[sym])})"
         )
 
     def _record_pnl(
-        self, sym: str, exit_price: float, prev_net: int, close_qty: int
+        self, sym: str, exit_price: float, prev_net: float, close_qty: float
     ) -> None:
         total_cost = self._total_cost.get(sym, 0.0)
         if prev_net == 0:
@@ -196,9 +236,26 @@ class MomentumStrategy(StrategyBase):
         self.perf.record_close(sym, pnl, direction)
         logger.info(
             f"  -> Closed {'LONG' if prev_net > 0 else 'SHORT'} "
-            f"{abs(close_qty)}x {sym}  est.PnL={pnl:+.2f}"
+            f"{_fmt_qty(abs(close_qty))}x {sym}  est.PnL={pnl:+.2f}"
         )
         logger.info(f"  -> {self.perf.summary()}")
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+def _fmt_qty(qty: float) -> str:
+    """Format a quantity: integer display for whole numbers, 4 d.p. for fractional."""
+    if qty == int(qty):
+        return str(int(qty))
+    return f"{qty:.4f}"
+
+
+def _fmt_signed_qty(qty: float) -> str:
+    """Like _fmt_qty but always shows the sign (for net position displays)."""
+    sign = "+" if qty >= 0 else ""
+    return f"{sign}{_fmt_qty(qty)}"
 
 
 def _sig_label(sig: int | None) -> str:

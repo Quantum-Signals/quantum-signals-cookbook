@@ -1,10 +1,11 @@
 [project]
 name = "live-trader"
 version = "0.1.0"
-description = "QuantumSignals x IB Gateway algorithmic trading bot"
+description = "QuantumSignals algorithmic trading bot (IBKR + Alpaca)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "alpaca-py>=0.29.0",
     "ib-async>=2.0.0",
     "loguru>=0.7.3",
     "python-dotenv>=1.2.2",
