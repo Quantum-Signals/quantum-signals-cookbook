@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import threading
 import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from loguru import logger
 from quantumsignals.client import Client as QSClient
 from trader.config import Settings, load_settings
@@ -21,7 +24,17 @@ _STRATEGIES = {
 }
 
 
-def _setup_logging() -> None:
+def _setup_logging() -> str:
+    """Configure logging for this session.
+
+    Creates a dedicated log file named with the session start timestamp so
+    every run produces its own file (e.g. ``logs/session_2026-05-13_14-05-30.log``).
+    Returns the session ID string used in the filename.
+    """
+    session_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    os.makedirs("logs", exist_ok=True)
+    log_path = f"logs/session_{session_id}.log"
+
     logger.remove()
     logger.add(
         sys.stderr,
@@ -29,11 +42,27 @@ def _setup_logging() -> None:
         level="INFO",
     )
     logger.add(
-        "logs/trader_{time:YYYY-MM-DD}.log",
-        rotation="1 day",
-        retention="30 days",
+        log_path,
         level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}",
+        encoding="utf-8",
     )
+    return session_id
+
+
+def _session_end_dt(settings: Settings) -> datetime:
+    """Return today's session-end as a timezone-aware datetime."""
+    try:
+        tz = ZoneInfo(settings.session_timezone)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            f"Unknown timezone '{settings.session_timezone}', falling back to UTC"
+        )
+        tz = ZoneInfo("UTC")
+
+    h, m = (int(x) for x in settings.session_end_time.split(":"))
+    now_local = datetime.now(tz)
+    return now_local.replace(hour=h, minute=m, second=0, microsecond=0)
 
 
 def _log_model_catalog(settings: Settings) -> None:
@@ -70,9 +99,9 @@ def _close_all_positions(
         logger.warning(f"CLOSE_ON_EXIT: closing {len(pos_list)} open position(s)…")
         for p in pos_list:
             sym = p["symbol"]
-            qty = int(p["qty"])
+            qty = float(p["qty"])
             avg_price = p["avg_price"]
-            if qty == 0:
+            if abs(qty) < 1e-9:
                 continue
 
             label = "LONG" if qty > 0 else "SHORT"
@@ -112,7 +141,7 @@ def _close_all_positions(
 
 
 def main() -> None:
-    _setup_logging()
+    session_id = _setup_logging()
 
     settings = load_settings()
 
@@ -121,11 +150,18 @@ def main() -> None:
     else:
         broker_label = f"LIVE ({settings.broker.upper()})"
 
+    eod_dt = _session_end_dt(settings)
+
     logger.info("=" * 60)
     logger.info("  QuantumSignals Live Trader  ")
-    logger.info(f"  Broker: {broker_label}")
-    logger.info(f"  Strategy: {settings.strategy}")
-    logger.info(f"  Execution interval: {settings.execution_interval_minutes} min")
+    logger.info(f"  Session ID : {session_id}")
+    logger.info(f"  Log file   : logs/session_{session_id}.log")
+    logger.info(f"  Broker     : {broker_label}")
+    logger.info(f"  Strategy   : {settings.strategy}")
+    logger.info(f"  Exec interval : {settings.execution_interval_minutes} min")
+    logger.info(
+        f"  Session end: {eod_dt.strftime('%H:%M')} {settings.session_timezone}"
+    )
     logger.info("=" * 60)
 
     perf = PerformanceTracker()
@@ -163,11 +199,12 @@ def main() -> None:
     logger.info("QuantumSignals stream thread started")
 
     # ib_async: same thread as gw.connect() must run qualifyContracts / orders / account.
-    report_interval_s = 60.0
+    report_interval_s = 300.0
     tick_interval_s = 1.0
     poll_s = 0.05
     next_report_at = time.monotonic() + report_interval_s
     next_tick_at = time.monotonic()
+    eod_triggered = False
 
     logger.info("Bot running. Press Ctrl-C to stop.")
     try:
@@ -187,18 +224,32 @@ def main() -> None:
             except queue.Empty:
                 pass
 
-            now = time.monotonic()
+            now_mono = time.monotonic()
 
-            if now >= next_tick_at:
+            if now_mono >= next_tick_at:
                 try:
                     strategy.tick()
                 except Exception as exc:
                     logger.exception(f"Strategy tick error: {exc}")
-                next_tick_at = now + tick_interval_s
+                next_tick_at = now_mono + tick_interval_s
 
-            if now >= next_report_at:
+            if now_mono >= next_report_at:
                 report_once(gw, perf)
-                next_report_at = now + report_interval_s
+                next_report_at = now_mono + report_interval_s
+
+            # End-of-day auto-shutdown: trigger once when wall-clock passes eod_dt.
+            if not eod_triggered:
+                try:
+                    tz = ZoneInfo(settings.session_timezone)
+                except ZoneInfoNotFoundError:
+                    tz = ZoneInfo("UTC")
+                if datetime.now(tz) >= eod_dt:
+                    eod_triggered = True
+                    logger.info(
+                        f"End-of-day reached ({settings.session_end_time} "
+                        f"{settings.session_timezone}) — initiating session shutdown…"
+                    )
+                    break
 
             time.sleep(poll_s)
 
@@ -213,9 +264,11 @@ def main() -> None:
             exit_pnl = _close_all_positions(gw, settings, perf)
 
         cap = settings.daily_start_capital
+        shutdown_reason = "end-of-day" if eod_triggered else "manual (Ctrl-C)"
 
         logger.info("=" * 60)
-        logger.info("SESSION SUMMARY")
+        logger.info(f"SESSION SUMMARY  [{session_id}]")
+        logger.info(f"  Shutdown reason            : {shutdown_reason}")
         logger.info(f"  In-session PnL (flattened) : ${pnl_before_exit:+,.2f}")
         logger.info(f"  Exit close PnL             : ${exit_pnl:+,.2f}")
         logger.info(f"  Total session PnL          : ${perf.gross_pnl:+,.2f}")

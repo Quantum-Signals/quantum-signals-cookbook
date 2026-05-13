@@ -65,6 +65,10 @@ class Settings:
     daily_start_capital: float = 100_000.0
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
     execution_interval_minutes: int = 5
+    # Session end: trader auto-stops at this local time and closes all positions.
+    # Format: "HH:MM" (24-hour). Default is 4 PM New York time.
+    session_end_time: str = "16:00"
+    session_timezone: str = "America/New_York"
     symbol_map: dict[str, dict] = field(default_factory=lambda: dict(_DEFAULT_SYMBOL_MAP))
     position_sizes: dict[str, int] = field(default_factory=lambda: dict(_DEFAULT_POSITION_SIZES))
     sim_prices: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_SIM_PRICES))
@@ -123,4 +127,6 @@ def load_settings() -> Settings:
         daily_start_capital=float(os.getenv("DAILY_START_CAPITAL", "100000")),
         signal_queue_maxsize=int(os.getenv("SIGNAL_QUEUE_MAXSIZE", "0")),
         execution_interval_minutes=interval,
+        session_end_time=os.getenv("SESSION_END_TIME", "16:00"),
+        session_timezone=os.getenv("SESSION_TIMEZONE", "America/New_York"),
     )
