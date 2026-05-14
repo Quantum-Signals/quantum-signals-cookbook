@@ -65,10 +65,19 @@ class Settings:
     daily_start_capital: float = 100_000.0
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
     execution_interval_minutes: int = 5
-    # Session end: trader auto-stops at this local time and closes all positions.
-    # Format: "HH:MM" (24-hour). Default is 4 PM New York time.
+    # Session end: trader closes all positions and logs the daily summary at
+    # this local time. Format: "HH:MM" (24-hour). Default is 4 PM NY time.
     session_end_time: str = "16:00"
+    # Session start: when multi-day mode is enabled, the process sleeps until
+    # this local time on the next trading day before resuming. Defaults to
+    # 9:30 AM NY (cash market open).
+    session_start_time: str = "09:30"
     session_timezone: str = "America/New_York"
+    # Number of full trading days to run before exiting.
+    #   0 = run indefinitely (until Ctrl-C) — recommended for "leave it on for a week".
+    #   1 = single-day mode (legacy behaviour: exit after first EOD).
+    #   N = exit after N EODs.
+    run_days: int = 0
     symbol_map: dict[str, dict] = field(default_factory=lambda: dict(_DEFAULT_SYMBOL_MAP))
     position_sizes: dict[str, int] = field(default_factory=lambda: dict(_DEFAULT_POSITION_SIZES))
     sim_prices: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_SIM_PRICES))
@@ -128,5 +137,7 @@ def load_settings() -> Settings:
         signal_queue_maxsize=int(os.getenv("SIGNAL_QUEUE_MAXSIZE", "0")),
         execution_interval_minutes=interval,
         session_end_time=os.getenv("SESSION_END_TIME", "16:00"),
+        session_start_time=os.getenv("SESSION_START_TIME", "09:30"),
         session_timezone=os.getenv("SESSION_TIMEZONE", "America/New_York"),
+        run_days=int(os.getenv("RUN_DAYS", "0")),
     )

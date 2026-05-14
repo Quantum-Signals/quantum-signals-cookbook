@@ -58,8 +58,16 @@ The bot starts immediately, streams signals, and executes trades. Logs are saved
 # Follow live output
 docker logs -f live-trader
 
-# Or open the log file directly
-cat logs/trader_$(date +%Y-%m-%d).log
+# One log file per trading day per process run.
+# Filename = session_<trading-day>_<process-start-time>.log
+ls logs/
+# session_2026-05-14_09-00-00.log
+# session_2026-05-15_09-00-00.log
+# session_2026-05-18_09-00-00.log   # Mon (Sat/Sun skipped)
+# session_2026-05-18_14-30-15.log   # Same-day restart → new file
+
+# Open today's logs (may be multiple if you restarted)
+ls logs/session_$(date +%Y-%m-%d)_*.log
 ```
 
 ### 4. Stop the bot
@@ -107,6 +115,34 @@ All settings are passed as environment variables in the `.env` file.
 | `CLOSE_ON_EXIT` | `true` | Flatten all open positions when the bot stops |
 | `DAILY_START_CAPITAL` | `100000` | Notional capital used for return % in the session summary |
 | `SIGNAL_QUEUE_MAXSIZE` | `0` | Max buffered signals (`0` = unlimited) |
+
+### Session window & multi-day mode
+
+By default the bot runs **indefinitely** across multiple trading days. At the
+end of every session it flattens positions, logs a daily summary, resets its
+per-day counters, sleeps over the night/weekend, and resumes when the next
+weekday's session start arrives. A cumulative run summary is printed when you
+finally stop the bot (Ctrl-C).
+
+Each trading day gets its **own log file** under `logs/`, named
+`session_<YYYY-MM-DD>_<HH-MM-SS>.log` where the `HH-MM-SS` suffix is the
+**process start time**. Overnight idle messages between two sessions land in
+the *upcoming* day's file.
+
+- One 4-day uninterrupted run → 4 log files (same start-time suffix).
+- Ctrl-C and restart on the same day → that day gets **2 separate files**,
+  one for each process run, with their respective start-time suffixes.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SESSION_START_TIME` | `09:30` | Local time at which a new trading day resumes |
+| `SESSION_END_TIME`   | `16:00` | Local time at which positions are flattened and the daily summary is logged |
+| `SESSION_TIMEZONE`   | `America/New_York` | Timezone for the times above |
+| `RUN_DAYS`           | `0` | `0` = run indefinitely; `1` = exit after first EOD (legacy single-day behaviour); `N` = exit after N EODs |
+
+Weekends are skipped automatically. US holidays are **not** detected — on a
+holiday the bot wakes up normally but the QS stream simply produces no
+actionable signals, so the day passes with an empty summary.
 
 ### Interactive Brokers (optional — only if `BROKER=ibkr`)
 

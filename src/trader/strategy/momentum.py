@@ -108,6 +108,20 @@ class MomentumStrategy(StrategyBase):
         )
 
     # ------------------------------------------------------------------
+    # Multi-day lifecycle
+    # ------------------------------------------------------------------
+    def reset_for_new_day(self) -> None:
+        """Drop yesterday's net-position / cost-basis / interval timers.
+
+        Called by the supervisor after EOD flattening so a fresh session
+        starts from a clean slate.
+        """
+        self._net_qty.clear()
+        self._total_cost.clear()
+        self._last_exec_time.clear()
+        logger.debug("MomentumStrategy: per-day state cleared")
+
+    # ------------------------------------------------------------------
     # Position sync
     # ------------------------------------------------------------------
     def sync_positions(self) -> None:

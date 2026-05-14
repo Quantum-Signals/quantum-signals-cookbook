@@ -51,6 +51,20 @@ class PerformanceTracker:
     def win_rate(self) -> float:
         return self.winning_trades / self.total_trades if self.total_trades else 0.0
 
+    def reset(self) -> None:
+        """Zero all daily counters. Used between trading days in multi-day mode.
+
+        The same instance is reset in-place so strategies holding a reference
+        keep seeing the live tracker.
+        """
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+        self.gross_pnl = 0.0
+        self._trade_log.clear()
+        for k in self.signal_counts:
+            self.signal_counts[k] = 0
+
     def summary(self) -> str:
         return (
             f"Trades={self.total_trades} | "

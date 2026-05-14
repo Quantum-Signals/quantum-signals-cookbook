@@ -79,6 +79,21 @@ class SignalFollowerStrategy(StrategyBase):
         self._close_stale_positions("startup")
 
     # ------------------------------------------------------------------
+    # Multi-day lifecycle — called by app after EOD flatten + summary
+    # ------------------------------------------------------------------
+    def reset_for_new_day(self) -> None:
+        """Drop yesterday's per-day state. The next incoming signal will
+        trigger ``_reset_day`` automatically once we see a new ET date."""
+        self._active_decision.clear()
+        self._net_qty.clear()
+        self._total_cost.clear()
+        self._daily_pnl = 0.0
+        self._pre_market_done = False
+        self._close_window_done = False
+        self._current_date = None
+        logger.debug("SignalFollowerStrategy: per-day state cleared")
+
+    # ------------------------------------------------------------------
     # Main entry — called once per QS signal
     # ------------------------------------------------------------------
     def handle_signal(self, signal: object) -> None:
