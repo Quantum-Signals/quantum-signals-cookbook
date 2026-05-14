@@ -97,6 +97,20 @@ class MomentumStrategy(StrategyBase):
         self._total_cost: dict[str, float] = {}
         self._last_exec_time: dict[str, float] = {}
 
+        # Per-symbol "fractional reserve" carrying the difference between the
+        # strategy's *ideal* (continuous) net position and what the broker can
+        # actually hold. Alpaca rejects any order whose resulting position is a
+        # fractional short (code 42210000), so when the ideal is negative we
+        # snap the broker-side position to the nearest whole share and park
+        # the leftover here. The reserve drains naturally on the next signal:
+        # if the ideal crosses an integer boundary, the next order lands at
+        # the new target and the reserve updates accordingly.
+        #
+        # Invariant: ideal_net = actual_net + reserve. Reserve is 0 when the
+        # ideal is non-negative (fractional longs are held exactly), and lives
+        # in roughly [-0.5, +0.5] otherwise.
+        self._position_reserve: dict[str, float] = {}
+
         execs_per_day = _TRADING_MINUTES_PER_DAY // self._interval_minutes
         logger.info(
             f"MomentumStrategy: interval={self._interval_minutes}min  "
@@ -119,13 +133,24 @@ class MomentumStrategy(StrategyBase):
         self._net_qty.clear()
         self._total_cost.clear()
         self._last_exec_time.clear()
+        self._position_reserve.clear()
         logger.debug("MomentumStrategy: per-day state cleared")
 
     # ------------------------------------------------------------------
     # Position sync
     # ------------------------------------------------------------------
     def sync_positions(self) -> None:
-        """Seed the bot's position state from existing broker positions."""
+        """Reconcile the bot's position state with what the broker actually holds.
+
+        Clears any stale entries first so positions that have disappeared at the
+        broker (e.g. EOD orders that filled overnight, manual closes) no longer
+        linger in strategy state. Cooldown timers in ``_last_exec_time`` are
+        preserved.
+        """
+        self._net_qty.clear()
+        self._total_cost.clear()
+        self._position_reserve.clear()
+
         pos_list = self.gw.get_positions_for_sync()
         for p in pos_list:
             etf_sym = p["symbol"]
@@ -189,6 +214,27 @@ class MomentumStrategy(StrategyBase):
     # Execution
     # ------------------------------------------------------------------
     def _execute(self, sym: str, sig: int, now: float) -> None:
+        """Drive ``_net_qty[sym]`` toward a feasible target net position.
+
+        The "ideal" net position is purely numeric: each UP slice adds
+        ``+qty`` (a fractional share), each DOWN slice adds ``-qty``. The
+        *feasible* position is what the broker can actually hold:
+
+        - Long side (>= 0): fractional shares are fine on Alpaca, integer on
+          IBKR.
+        - Short side (< 0): Alpaca forbids fractional shorts (code 42210000),
+          so we snap the broker-side position to the **nearest** whole share
+          (``round``) and park the leftover (in ``[-0.5, +0.5)``) in
+          ``_position_reserve``. The reserve carries to the next signal so
+          the next order naturally lands at the new whole-share target.
+
+        Invariant: ``ideal_net == self._net_qty[sym] + self._position_reserve[sym]``.
+
+        The order placed each call is just ``feasible_target - current_net``:
+        any size on the long side (fractional ok), whole-share size on the
+        short side, and zero on slices where the reserve hasn't crossed an
+        integer boundary yet.
+        """
         trade_sym = _SIGNAL_TO_TRADE[sym]
         contract = self.gw.resolve_contract(trade_sym)
         if contract is None:
@@ -203,25 +249,56 @@ class MomentumStrategy(StrategyBase):
             logger.warning(f"  -> No market data for {trade_sym} — skipping")
             return
 
-        qty = _compute_order_qty(
+        slice_qty = _compute_order_qty(
             self._interval_minutes, price,
             self._target_daily_notional_per_symbol,
             self._use_fractional,
         )
-        action = "BUY" if sig == Signal.UP else "SELL"
-        signed_qty = qty if sig == Signal.UP else -qty
+        signed_slice = slice_qty if sig == Signal.UP else -slice_qty
 
         prev_net = self._net_qty.get(sym, 0.0)
-        new_net = prev_net + signed_qty
+        prev_reserve = self._position_reserve.get(sym, 0.0)
+
+        ideal_net = prev_net + prev_reserve + signed_slice
+
+        if self._use_fractional:
+            if ideal_net >= -1e-9:
+                target_net = max(0.0, ideal_net)
+                new_reserve = 0.0
+            else:
+                target_net = float(round(ideal_net))
+                new_reserve = ideal_net - target_net
+        else:
+            target_net = float(round(ideal_net))
+            new_reserve = 0.0
+
+        self._last_exec_time[sym] = now
+
+        delta = target_net - prev_net
+
+        if abs(delta) < 1e-9:
+            self._position_reserve[sym] = new_reserve
+            direction = "short" if signed_slice < 0 else "long"
+            logger.info(
+                f"  -> No order for {trade_sym}: accumulating {direction} intent "
+                f"(reserve={_fmt_signed_qty(new_reserve)}, "
+                f"net stays at {_fmt_signed_qty(prev_net)})"
+            )
+            return
+
+        action = "BUY" if delta > 0 else "SELL"
+        trade_qty = abs(delta)
+        signed_trade_qty = delta
+        new_net = target_net
 
         crosses_zero = prev_net != 0 and (prev_net > 0) != (new_net > 0) and new_net != 0
         goes_flat = prev_net != 0 and abs(new_net) < 1e-9
 
-        trade = self.gw.place_order(contract, action, qty, price)
+        trade = self.gw.place_order(contract, action, trade_qty, price)
         if trade is None:
             return
 
-        self._last_exec_time[sym] = now
+        self._position_reserve[sym] = new_reserve
 
         if goes_flat or crosses_zero:
             self._record_pnl(sym, price, prev_net, close_qty=prev_net)
@@ -233,12 +310,18 @@ class MomentumStrategy(StrategyBase):
                 self._total_cost[sym] = 0.0
         else:
             self._net_qty[sym] = new_net
-            self._total_cost[sym] = self._total_cost.get(sym, 0.0) + signed_qty * price
+            self._total_cost[sym] = self._total_cost.get(sym, 0.0) + signed_trade_qty * price
 
+        reserve_note = (
+            f"  (reserve: {_fmt_signed_qty(new_reserve)})"
+            if abs(new_reserve) > 1e-9
+            else ""
+        )
         logger.info(
-            f"  -> {action} {_fmt_qty(qty)}x {trade_sym} @ {price:.2f}  "
-            f"notional=${qty * price:,.2f}  [signal={sym}]  "
-            f"(net: {_fmt_signed_qty(prev_net)} → {_fmt_signed_qty(self._net_qty[sym])})"
+            f"  -> {action} {_fmt_qty(trade_qty)}x {trade_sym} @ {price:.2f}  "
+            f"notional=${trade_qty * price:,.2f}  [signal={sym}]  "
+            f"(net: {_fmt_signed_qty(prev_net)} → {_fmt_signed_qty(new_net)})"
+            f"{reserve_note}"
         )
 
     def _record_pnl(

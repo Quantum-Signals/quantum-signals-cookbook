@@ -473,6 +473,16 @@ def main() -> None:
             )
             logger.info("=" * 60)
 
+            # Re-sync from the broker right before the session starts: positions
+            # can change between process start and the actual open (EOD orders
+            # settling overnight, manual edits, pre-market activity, etc).
+            # Without this, strategy state can drift from reality and produce
+            # rejected orders (e.g. SELL on a position the broker no longer holds).
+            try:
+                strategy.sync_positions()
+            except Exception as exc:
+                logger.warning(f"Pre-session position re-sync failed: {exc}")
+
             reached_eod = _run_trading_day(
                 eod_dt, tz, gw, strategy, perf, settings, stop_event, signal_queue
             )
@@ -505,11 +515,17 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Ctrl-C received — shutting down…")
         shutdown_reason = "manual (Ctrl-C)"
-        if perf.gross_pnl != 0.0 or perf.total_trades > 0:
-            intraday_pnl = perf.gross_pnl
-            exit_pnl = 0.0
-            if settings.close_on_exit:
-                exit_pnl = _close_all_positions(gw, settings, perf)
+
+        # Always attempt to flatten on shutdown when close_on_exit is enabled,
+        # regardless of whether *perf* has any closed trades. Open positions
+        # accumulated this run (or carried over from a previous run) must not
+        # be left at the broker.
+        intraday_pnl = perf.gross_pnl
+        exit_pnl = 0.0
+        if settings.close_on_exit:
+            exit_pnl = _close_all_positions(gw, settings, perf)
+
+        if perf.gross_pnl != 0.0 or perf.total_trades > 0 or exit_pnl != 0.0:
             _log_day_summary(
                 datetime.now(tz).date(), perf, intraday_pnl, exit_pnl, settings
             )

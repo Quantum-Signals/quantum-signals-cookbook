@@ -144,7 +144,19 @@ class AlpacaGateway(GatewayBase):
         try:
             order = self._trading_client.submit_order(req)
         except Exception as exc:
+            msg = str(exc)
             logger.error(f"[Alpaca] Order submission failed for {ticker}: {exc}")
+            # Code 42210000 means the resulting position would be a fractional
+            # short. Almost always indicates the strategy's net_qty has drifted
+            # from the broker's actual position — the next sync_positions()
+            # call (start of next trading day) will reconcile.
+            if "42210000" in msg or "fractional orders cannot be sold short" in msg:
+                logger.warning(
+                    f"[Alpaca] Hint: this typically means strategy state for "
+                    f"{ticker} is out of sync with the broker. The bot will "
+                    f"re-sync at the next session start; manually flatten any "
+                    f"stray positions in the Alpaca dashboard if needed."
+                )
             return None
 
         logger.debug(
