@@ -66,8 +66,10 @@ class Settings:
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
     execution_interval_minutes: int = 5
     # Session end: trader closes all positions and logs the daily summary at
-    # this local time. Format: "HH:MM" (24-hour). Default is 4 PM NY time.
-    session_end_time: str = "16:00"
+    # this local time. Format: "HH:MM" (24-hour). Set to 15:55 NY so the EOD
+    # flatten executes during regular-hours liquidity (5 min before the close)
+    # instead of racing the 16:00 closing auction and getting post-close fills.
+    session_end_time: str = "15:55"
     # Session start: when multi-day mode is enabled, the process sleeps until
     # this local time on the next trading day before resuming. Defaults to
     # 9:30 AM NY (cash market open).
@@ -136,7 +138,7 @@ def load_settings() -> Settings:
         daily_start_capital=float(os.getenv("DAILY_START_CAPITAL", "100000")),
         signal_queue_maxsize=int(os.getenv("SIGNAL_QUEUE_MAXSIZE", "0")),
         execution_interval_minutes=interval,
-        session_end_time=os.getenv("SESSION_END_TIME", "16:00"),
+        session_end_time=os.getenv("SESSION_END_TIME", "15:55"),
         session_start_time=os.getenv("SESSION_START_TIME", "09:30"),
         session_timezone=os.getenv("SESSION_TIMEZONE", "America/New_York"),
         run_days=int(os.getenv("RUN_DAYS", "0")),
