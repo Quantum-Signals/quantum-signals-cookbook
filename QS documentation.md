@@ -1,317 +1,223 @@
-QuantumSignals Python Client
-The official Python client library for the QuantumSignals API. This client provides a simple, intuitive interface for authentication, streaming signals, managing API keys, and accessing backtest results.
+Quickstart Guide¶
+Get started with the QuantumSignals API in 5 minutes using the official Python client.
 
-Installation
+Prerequisites¶
+Python 3.10+
+Installation¶
 Install the QuantumSignals Python client using pip or uv:
 
-pip install quantumsignals-client
 
-Copy
-Quick Start
-Get started in 30 seconds. Obtain your API key from your administrator or the QuantumSignals dashboard, then:
+pip install quantumsignals-client
+Step 1: Authenticate¶
+The QuantumSignals client uses API key authentication. Obtain your API key from your administrator or the QuantumSignals dashboard:
+
 
 from quantumsignals.client import Client
 
 # Create client with your API key
 client = Client(api_key="qsk_your_api_key_here")
 
-# Stream real-time trading signals
-for signal in client.stream_signals():
-    print(f"{signal.time} | {signal.symbol}: {signal.signal}")
-
-Copy
-Authentication
+print("Client ready!")
 For production use, load the API key from environment variables:
+
 
 import os
 from quantumsignals.client import Client
 
-api_key = os.getenv("QUANTUMSIGNALS_API_KEY")
-if not api_key:
-    raise ValueError("QUANTUMSIGNALS_API_KEY environment variable required")
+client = Client(api_key=os.getenv("QUANTUMSIGNALS_API_KEY"))
+Step 2: Fetch Available Models¶
+Get the catalog of available trading models:
 
-client = Client(api_key=api_key)
 
-Copy
-Core Features
-Model Catalog
-Get information about available trading models:
-
-# Get catalog as dict[model_id -> ModelDescription]
+# Get model catalog
 models = client.get_model_catalog()
 
+# Display available models
 for model_id, model in models.items():
     print(f"Model: {model_id}")
-    print(f"  Trained on: {', '.join(model.trained_on_symbols)}")
-    print(f"  Date range: {model.trained_date_range[0]} to {model.trained_date_range[1]}")
-    print(f"  Hash: {model.hash}")
+    print(f"  Symbols: {', '.join(model.trained_on_symbols)}")
+    print(f"  Training period: {model.trained_date_range[0]} to {model.trained_date_range[1]}")
+Step 3: Stream Trading Signals¶
+Stream real-time trading signals using a simple iterator pattern:
 
-Copy
-Signal Streaming
-Stream real-time trading signals via Server-Sent Events:
 
-# Stream indefinitely
+# Stream signals (runs indefinitely)
 for signal in client.stream_signals():
-    print(f"Time: {signal.time}")
-    print(f"Symbol: {signal.symbol}")
-    print(f"Signal: {signal.signal}")  # 0 (down), 1 (stable), 2 (up)
-    print(f"Model: {signal.model}")
+    print(f"{signal.symbol}: {signal.signal}")  # 0 (down/sell), 1 (stable/hold), 2 (up/buy)
 
     # Process signal
     if signal.signal == 2:
-        execute_long(signal.symbol)
+        print(f"  → BUY signal for {signal.symbol}")
     elif signal.signal == 0:
-        execute_short(signal.symbol)
+        print(f"  → SELL signal for {signal.symbol}")
+The client handles all the complexity of Server-Sent Events (SSE) parsing and connection management.
 
-Copy
-Signal Data Model:
+Step 4: Fetch Backtest Results¶
+Access historical backtest results by model family and symbol:
 
-time: int - Unix timestamp
-symbol: str - Trading symbol (e.g., "AAPL")
-signal: int - Signal value: 0 (down/short), 1 (stable/hold), 2 (up/long)
-model: str - Model identifier
-Backtest Operations
-Access historical backtest data to evaluate model performance. Backtest data includes predictions, actual outcomes, and performance metrics for each model-symbol combination.
 
-How Backtests Work
-Backtests are identified by a model_family (e.g., "Pythia") and a symbol (e.g., "ES"). Each backtest contains:
+# Specify the model family and symbol to query
+model_family = "Pythia-bB8ES"  # Your model family name
+symbol = "S&P500"  # Trading symbol, can also use the raw symbol "ES"
 
-Metadata - Information about the backtest configuration, date ranges, and status
-Historical Predictions - Time-series data of model predictions vs actual outcomes with PnL calculations
-Daily Summaries - Aggregated performance metrics for each trading day
-Get Backtest Metadata
-Retrieve metadata about a backtest, including its configuration and date ranges:
-
-from quantumsignals.client import BacktestMetadata
-
-# Get metadata for a specific model-symbol combination
-metadata: BacktestMetadata = client.get_backtest_metadata(
-    model_family="Pythia",
-    symbol="ES"
+# Get metadata to see what data is available
+metadata = client.get_backtest_metadata(
+    model_family=model_family,
+    symbol=symbol
 )
+print(f"Data available: {metadata['min_date']} to {metadata['max_date']}")
+print(f"Total rows: {metadata['row_count']}")
 
-print(f"Model Family: {metadata.model_family}")
-print(f"Symbol: {metadata.symbol}")
-print(f"Backtest range: {metadata.backtest_from_date} to {metadata.backtest_to_date}")
-print(f"Training range: {metadata.training_from_date} to {metadata.training_to_date}")
-print(f"Status: {metadata.status}")
-
-Copy
-Get Historical Predictions
-Retrieve historical prediction data with pagination support and multiple export formats:
-
-# Get predictions with pagination (JSON format)
-predictions = client.get_historical_predictions(
-    model_family="Pythia",
-    symbol="ES",
-    format="json",
-    page=1,
-    page_size=1000
-)
-
-# Process paginated results
-print(f"Page: {predictions['page']} of {predictions['total_pages']}")
-print(f"Total records: {predictions['total']}")
-
-for row in predictions['data']:
-    print(f"{row['date_time']}: pred={row['prediction']}, actual={row['label']}, pnl={row['cumulative_pnl']}")
-
-# Optional: Filter by date range
-filtered_predictions = client.get_historical_predictions(
-    model_family="Pythia",
-    symbol="ES",
-    format="json",
-    from_date="2024-01-01",
-    to_date="2024-12-31",
-    page=1,
-    page_size=1000
-)
-
-Copy
-Bulk Export Formats
-
-For large datasets, export to CSV or Parquet for efficient offline analysis:
-
-# Export to CSV (returns bytes)
-csv_data = client.get_historical_predictions(
-    model_family="Pythia",
-    symbol="ES",
-    format="csv"
-)
-with open("backtest_predictions.csv", "wb") as f:
-    f.write(csv_data)
-
-# Export to Parquet (returns bytes, efficient for large datasets)
-parquet_data = client.get_historical_predictions(
-    model_family="Pythia",
-    symbol="ES",
-    format="parquet"
-)
-with open("backtest_predictions.parquet", "wb") as f:
-    f.write(parquet_data)
-
-# Load Parquet with pandas for analysis
-import pandas as pd
-df = pd.read_parquet("backtest_predictions.parquet")
-print(df.head())
-
-Copy
-Prediction Data Fields:
-
-date_time: str - ISO timestamp (e.g., "2025-10-01T09:30:00")
-prediction: int - Model prediction: 0 (down), 1 (stable), 2 (up)
-label: int - Actual outcome: 0 (down), 1 (stable), 2 (up)
-cumulative_pnl: float - Cumulative profit/loss at this point
-Get Daily Backtest Summaries
-Get aggregated daily performance metrics for quick analysis:
-
-# Get daily summaries with pagination
-daily_backtests = client.get_daily_backtests(
-    model_family="Pythia",
-    symbol="ES",
+# Get historical minute predictions (paginated)
+results = client.get_historical_predictions(
+    model_family=model_family,
+    symbol=symbol,
     format="json",
     page=1,
     page_size=100
 )
 
-for day in daily_backtests['data']:
-    print(f"Date: {day['date']}")
-    print(f"  Accuracy: {day['accuracy']:.2%}")
-    print(f"  Daily PnL: ${day['daily_pnl']:,.2f}")
-    print(f"  Cumulative PnL: ${day['cumulative_pnl']:,.2f}")
-    print(f"  Total predictions: {day['total_predictions']}")
+for row in results['data']:
+    print(f"Time: {row['signal_time_utc']}, Prediction: {row['prediction']}, Label: {row['label']}")
 
-# Filter by date range
-recent_backtests = client.get_daily_backtests(
-    model_family="Pythia",
-    symbol="ES",
-    format="json",
-    from_date="2024-12-01",
-    to_date="2024-12-31",
-    page=1,
-    page_size=100
+# Get daily accuracy summaries
+daily = client.get_daily_backtests(
+    model_family=model_family,
+    symbol=symbol,
+    format="json"
 )
 
-# Export daily summaries to CSV or Parquet
-csv_summaries = client.get_daily_backtests(
-    model_family="Pythia",
-    symbol="ES",
-    format="csv"
-)
-with open("daily_summaries.csv", "wb") as f:
-    f.write(csv_summaries)
+for day in daily['data']:
+    print(f"Date: {day['accuracy_date']}, Accuracy: {day['accuracy_pct']:.1f}%")
+Complete Example¶
+Here's a complete example:
 
-Copy
-Daily Summary Data Fields:
 
-date: str - Trading date (e.g., "2024-12-15")
-accuracy: float - Prediction accuracy for the day (0.0 to 1.0)
-precision: float - Precision metric for the day
-recall: float - Recall metric for the day
-f1_score: float - F1 score for the day
-daily_pnl: float - Profit/loss for the day
-cumulative_pnl: float - Cumulative profit/loss up to this day
-total_predictions: int - Number of predictions made that day
-Best Practices
-Use Context Managers
-Properly close HTTP connections using context managers:
+from quantumsignals.client import Client, APIError
 
-from signalq.client import Client
-
-with Client(api_key="qsk_your_api_key_here") as client:
-    models = client.get_model_catalog()
-    # Client automatically closes on exit
-
-Copy
-Handle Exceptions
-The client provides specific exceptions for error handling:
-
-from signalq.client import Client, APIKeyError, APIError
-
+# Create client with your API key (obtain from your administrator or the QuantumSignals dashboard)
 client = Client(api_key="qsk_your_api_key_here")
 
 try:
+    # 1. Get available models
+    print("Available models:")
     models = client.get_model_catalog()
-except APIKeyError as e:
-    print(f"API key issue: {e}")
+    for model_id, model in models.items():
+        print(f"  - {model_id}: {', '.join(model.trained_on_symbols)}")
+
+    # 2. Stream and process signals
+    print("\nStreaming signals (Ctrl+C to stop)...")
+    for signal in client.stream_signals():
+        print(f"{signal.signal_time_utc} | {signal.symbol}: {signal.signal}")
+
+        # Execute trading logic based on signal
+        if signal.signal == 2:
+            print(f"  → Executing BUY for {signal.symbol}")
+            # execute_buy(signal.symbol)
+        elif signal.signal == 0:
+            print(f"  → Executing SELL for {signal.symbol}")
+            # execute_sell(signal.symbol)
+
 except APIError as e:
-    print(f"API request failed: {e}")
-    print(f"Status code: {e.status_code}")
-    print(f"Response: {e.response_body}")
+    print(f"API error: {e}")
+except KeyboardInterrupt:
+    print("\nStopped by user")
+finally:
+    client.close()
+Best Practice: Use a context manager to ensure proper cleanup:
 
-Copy
-Production Signal Streaming
-For production signal streaming with error recovery:
 
-from signalq.client import Client, APIError
-import time
+from quantumsignals.client import Client
 
-def stream_signals_with_retry(api_key: str, max_retries=3):
-    """Stream signals with automatic retry on failure."""
-    client = Client(api_key=api_key)
-    retry_count = 0
+with Client(api_key="qsk_your_api_key_here") as client:
+    models = client.get_model_catalog()
+    print(f"Found {len(models)} models")
 
-    while retry_count < max_retries:
-        try:
-            for signal in client.stream_signals():
-                # Process signal
-                process_signal(signal)
-                retry_count = 0  # Reset on successful signal
+    for signal in client.stream_signals():
+        process_signal(signal)
+# Client automatically closes here
+Next Steps¶
+Python Client Documentation - Complete guide to the Python client
+Authentication Guide - Detailed security best practices
+Streaming API Reference - Advanced SSE usage patterns
+API Reference - Complete endpoint documentation
+Advanced: Direct HTTP Integration¶
+For users who cannot use the Python client (e.g., integrating from other languages or custom tooling), here are examples using raw HTTP calls with httpx.
 
-        except APIError as e:
-            retry_count += 1
-            wait_time = 2 ** retry_count  # Exponential backoff
-            print(f"Stream error: {e}. Retrying in {wait_time}s...")
-            time.sleep(wait_time)
-        except KeyboardInterrupt:
-            print("Stopping stream...")
-            break
-        finally:
-            client.close()
+Getting Models (httpx)¶
 
-Copy
-Complete Example
-Here's a complete example:
+import httpx
 
-from signalq.client import Client, APIError
-import logging
+API_KEY = "your-api-key-here"
+BASE_URL = "https://api.quantumsignals.ai"
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+async def get_models():
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{BASE_URL}/v2/models",
+            headers={"x-api-key": API_KEY},
+        )
+        response.raise_for_status()
+        return response.json()
 
-def main():
-    """Main trading bot using QuantumSignals client."""
+models = await get_models()
+Streaming Signals (httpx)¶
 
-    # Initialize client with your API key (obtain from your administrator or the QuantumSignals dashboard)
-    with Client(api_key="qsk_your_api_key_here") as client:
-        # Get available models
-        logger.info("Fetching model catalog...")
-        models = client.get_model_catalog()
-        logger.info(f"Available models: {list(models.keys())}")
+import httpx
+import json
 
-        # Stream and process signals
-        logger.info("Starting signal stream...")
-        try:
-            for signal in client.stream_signals():
-                logger.info(
-                    f"Signal received: {signal.symbol} -> {signal.signal} "
-                    f"(model: {signal.model}, time: {signal.time})"
-                )
+async def stream_signals():
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            "GET",
+            f"{BASE_URL}/v2/signals",
+            headers={"x-api-key": API_KEY},
+            timeout=None,  # No timeout for streaming
+        ) as response:
+            response.raise_for_status()
 
-                # Execute trading logic
-                if signal.signal == 2:
-                    logger.info(f"LONG signal for{signal.symbol}")
-                    # execute_long(signal.symbol)
-                elif signal.signal == 0:
-                    logger.info(f"SHORT signal for{signal.symbol}")
-                    # execute_short(signal.symbol)
+            async for line in response.aiter_lines():
+                if line.startswith("data:"):
+                    signal_data = line[5:].strip()
+                    signal = json.loads(signal_data)
+                    print(f"Signal: {signal}")
 
-        except APIError as e:
-            logger.error(f"API error: {e}")
-            raise
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
+await stream_signals()
+Getting Backtest Results (httpx)¶
 
-if __name__ == "__main__":
-    main()
+import httpx
+
+async def get_historical_predictions(model_family: str, symbol: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{BASE_URL}/v2/backtest/historical_minute_predictions",
+            params={
+                "model_family": model_family,
+                "symbol": symbol,
+                "format": "json",
+                "page": 1,
+                "page_size": 100
+            },
+            headers={"x-api-key": API_KEY},
+        )
+        response.raise_for_status()
+        return response.json()
+
+async def get_daily_backtests(model_family: str, symbol: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{BASE_URL}/v2/backtest/daily_backtests",
+            params={
+                "model_family": model_family,
+                "symbol": symbol,
+                "format": "json"
+            },
+            headers={"x-api-key": API_KEY},
+        )
+        response.raise_for_status()
+        return response.json()
+
+# Usage
+predictions = await get_historical_predictions("Pythia-bB8ES", "ES")
+daily = await get_daily_backtests("Pythia-bB8ES", "ES")
+Note: The Python client is the recommended approach for Python users as it handles authentication, connection management, error handling, and SSE parsing automatically.

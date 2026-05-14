@@ -25,7 +25,7 @@ def main() -> None:
         print("\n--- Streaming Signals (Ctrl-C to stop) ---")
         try:
             for signal in client.stream_signals():
-                ts = signal.for_minute_utc
+                ts = signal.signal_time_utc
 
                 if signal.is_null_signal():
                     print(f"  {ts}  {signal.symbol:5s}  model={signal.model}  --  {signal.code_message}")

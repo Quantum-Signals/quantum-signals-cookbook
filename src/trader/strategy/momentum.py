@@ -12,8 +12,11 @@ from trader.strategy.base import StrategyBase
 _TRADING_MINUTES_PER_DAY = 390  # 6.5 hours for US equities
 
 _SIGNAL_TO_TRADE: dict[str, str] = {
+    # QS client < 0.5.1 used futures tickers; >= 0.5.1 uses full names
     "ES": "SPY",
     "NQ": "QQQ",
+    "S&P500": "SPY",
+    "Nasdaq100": "QQQ",
 }
 
 # Reverse map: ETF ticker → QS signal symbol (used by sync_positions)
@@ -134,7 +137,7 @@ class MomentumStrategy(StrategyBase):
     def handle_signal(self, signal: object) -> None:
         sym = signal.symbol
         sig = signal.signal
-        ts = signal.for_minute_utc
+        ts = signal.signal_time_utc
 
         if signal.is_null_signal():
             logger.debug(f"Signal  {sym}  model={signal.model}  -- {signal.code_message}")

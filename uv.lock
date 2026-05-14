@@ -991,7 +991,7 @@ wheels = [
 
 [[package]]
 name = "quantumsignals-client"
-version = "0.4.0"
+version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -1000,9 +1000,9 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5d/2b/f04ce0b0c9442c65bd639ab0387d9d6cace9e4a3ae6aaa9e02da36386041/quantumsignals_client-0.4.0.tar.gz", hash = "sha256:ce16cf4f5ef25180ffa42582ce31412d1247cc2533b014eb8f89f544d2662bcf", size = 12601, upload-time = "2026-03-11T11:57:37.577Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/11/f4/c9ac7dd2294eba7af3de645dab5c26f785824a9b4fbd679ba102f9a83dc7/quantumsignals_client-0.5.1.tar.gz", hash = "sha256:8c34de9399671a2115ce52dd35b2663c0b98553720b7b056534ebbc6d0aa1a9c", size = 13781, upload-time = "2026-05-12T11:12:12.443Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1a/cd/bc2f55e17326862d9b5605a4be2b32249c373e3bee924b82179fe34f8dff/quantumsignals_client-0.4.0-py3-none-any.whl", hash = "sha256:105ce6ad040bb91d53b107842be4440e9f0419389872772dc8abf4860ffc05df", size = 12301, upload-time = "2026-03-11T11:57:35.973Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/40/20584304092dbcb3a574189d5c1a74fab6f488b9c2bb6b17d68dcf6279d7/quantumsignals_client-0.5.1-py3-none-any.whl", hash = "sha256:b415205297aa0433ca1896c9e8f51abec485f27accc769ecf92ee75d551834a5", size = 12640, upload-time = "2026-05-12T11:12:11.51Z" },
 ]
 
 [[package]]

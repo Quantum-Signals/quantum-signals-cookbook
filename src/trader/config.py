@@ -106,7 +106,7 @@ def load_settings() -> Settings:
     raw_symbols = os.getenv("ALLOWED_SYMBOLS", "").strip()
     allowed: tuple[str, ...] = ()
     if raw_symbols:
-        allowed = tuple(s.strip().upper() for s in raw_symbols.split(",") if s.strip())
+        allowed = tuple(s.strip() for s in raw_symbols.split(",") if s.strip())
 
     interval = cli.execution_interval or int(os.getenv("EXECUTION_INTERVAL_MINUTES", "5"))
 

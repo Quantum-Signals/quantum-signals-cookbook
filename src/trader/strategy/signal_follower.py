@@ -20,8 +20,11 @@ _CLOSE_END = dt_time(16, 0)
 
 # Signals arrive for futures symbols; we trade the correlated ETF.
 _SIGNAL_TO_TRADE: dict[str, str] = {
+    # QS client < 0.5.1 used futures tickers; >= 0.5.1 uses full names
     "ES": "SPY",
     "NQ": "QQQ",
+    "S&P500": "SPY",
+    "Nasdaq100": "QQQ",
 }
 
 
@@ -89,7 +92,7 @@ class SignalFollowerStrategy(StrategyBase):
         if self._allowed and sym not in self._allowed:
             return
 
-        et_dt = _to_eastern(signal.for_minute_utc)
+        et_dt = _to_eastern(signal.signal_time_utc)
         et_date = et_dt.date()
         et_time = et_dt.time()
 
