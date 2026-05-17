@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
+from collections.abc import Callable
+from typing import Any, Optional
 
 from loguru import logger
 
 from trader.config import Settings
 from trader.gateways.base import GatewayBase
+
+# Alpaca's RESTClient uses ``requests.Session`` without per-call timeouts, so a
+# stalled TCP connection can block the main trading loop forever (e.g. during
+# ``report_once`` every 300s). Default (connect, read) seconds for all requests.
+_DEFAULT_ALPACA_HTTP_TIMEOUT: tuple[float, float] = (10.0, 60.0)
+
+
+def _install_default_request_timeout(rest_client: object, timeout: tuple[float, float]) -> None:
+    """Ensure ``session.request(..., timeout=...)`` so hung sockets cannot block indefinitely."""
+    session = getattr(rest_client, "_session", None)
+    if session is None:
+        return
+    orig_request: Callable[..., Any] = session.request
+
+    def request_with_default_timeout(method: str, url: str, **kwargs: Any) -> Any:
+        kwargs.setdefault("timeout", timeout)
+        return orig_request(method, url, **kwargs)
+
+    session.request = request_with_default_timeout  # type: ignore[method-assign]
 
 
 class AlpacaGateway(GatewayBase):
@@ -43,6 +63,9 @@ class AlpacaGateway(GatewayBase):
             self._settings.alpaca_api_key,
             self._settings.alpaca_secret_key,
         )
+        _install_default_request_timeout(self._trading_client, _DEFAULT_ALPACA_HTTP_TIMEOUT)
+        _install_default_request_timeout(self._data_client, _DEFAULT_ALPACA_HTTP_TIMEOUT)
+
         account = self._trading_client.get_account()
         mode = "PAPER" if self._settings.alpaca_paper else "LIVE"
         logger.success(
