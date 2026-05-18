@@ -62,7 +62,7 @@ class Settings:
     strategy: str = "momentum"  # "momentum" or "signal_follower"
     allowed_symbols: tuple[str, ...] = ()  # empty = allow all
     close_on_exit: bool = True
-    daily_start_capital: float = 100_000.0
+    daily_start_capital: float = 1_000_000.0
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
     execution_interval_minutes: int = 5
     # Session end: trader closes all positions and logs the daily summary at

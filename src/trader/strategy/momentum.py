@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 import time
 
 from loguru import logger
-
+from requests.exceptions import ReadTimeout, ConnectionError # <-- ADD THIS
+from urllib3.exceptions import ProtocolError
 from trader.config import Settings
 from trader.gateways.base import GatewayBase
 from trader.models import PerformanceTracker, Signal
@@ -151,7 +153,19 @@ class MomentumStrategy(StrategyBase):
         self._total_cost.clear()
         self._position_reserve.clear()
 
-        pos_list = self.gw.get_positions_for_sync()
+        pos_list = []
+        for attempt in range(3):
+            try:
+                pos_list = self.gw.get_positions_for_sync()
+                break
+            except (ReadTimeout, ConnectionError, ProtocolError) as e:
+                if attempt < 2:
+                    logger.warning(f"Network error during sync_positions. Retrying {attempt + 1}/3...")
+                    time.sleep(2)
+                else:
+                    logger.error("Failed to sync positions after 3 attempts. Aborting.")
+                    raise e
+
         for p in pos_list:
             etf_sym = p["symbol"]
             # Internal state is keyed by QS signal symbol ("ES"/"NQ"), not the
@@ -244,7 +258,19 @@ class MomentumStrategy(StrategyBase):
             )
             return
 
-        price = self.gw.get_last_price(contract)
+        # Safely fetch price with retry logic for disconnected/stale connections
+        price = None
+        for attempt in range(3):
+            try:
+                price = self.gw.get_last_price(contract)
+                break  # Success, break out of the retry loop
+            except (ConnectionError, ProtocolError) as e:
+                if attempt < 2:
+                    logger.warning(f"  -> Connection dropped fetching {trade_sym} price. Retrying {attempt + 1}/3...")
+                    time.sleep(2)
+                else:
+                    logger.error(f"  -> Failed to fetch price for {trade_sym} after 3 attempts.")
+                    
         if price is None:
             logger.warning(f"  -> No market data for {trade_sym} — skipping")
             return
@@ -291,7 +317,27 @@ class MomentumStrategy(StrategyBase):
         signed_trade_qty = delta
         new_net = target_net
 
-        crosses_zero = prev_net != 0 and (prev_net > 0) != (new_net > 0) and new_net != 0
+        if action == "SELL":
+            requested_qty = trade_qty
+            trade_qty = _cap_sell_qty(self.gw, trade_sym, trade_qty, self._use_fractional)
+            if trade_qty < 1e-9:
+                logger.warning(
+                    f"  -> No long shares available to sell for {trade_sym} — skipping"
+                )
+                return
+            if trade_qty < requested_qty - 1e-9:
+                logger.info(
+                    f"  -> Capped SELL {_fmt_qty(requested_qty)} → {_fmt_qty(trade_qty)} "
+                    f"(broker long available)"
+                )
+            signed_trade_qty = -trade_qty
+            new_net = prev_net + signed_trade_qty
+
+        crosses_zero = (
+            prev_net != 0
+            and (prev_net > 0) != (new_net > 0)
+            and abs(new_net) >= 1e-9
+        )
         goes_flat = prev_net != 0 and abs(new_net) < 1e-9
 
         trade = self.gw.place_order(contract, action, trade_qty, price)
@@ -344,6 +390,46 @@ class MomentumStrategy(StrategyBase):
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+def _floor_qty(qty: float, decimals: int = 4) -> float:
+    """Round down so order size never exceeds broker holdings (float-safe)."""
+    if qty <= 0:
+        return 0.0
+    factor = 10**decimals
+    return math.floor(qty * factor + 1e-12) / factor
+
+
+def _broker_long_qty(gw: GatewayBase, etf_symbol: str) -> float:
+    """Shares available to sell (long qty only; shorts return 0)."""
+    for attempt in range(3):
+        try:
+            for p in gw.get_positions_for_sync():
+                if p["symbol"] == etf_symbol:
+                    return max(0.0, float(p["qty"]))
+            return 0.0
+        except (ReadTimeout, ConnectionError, ProtocolError) as e:
+            if attempt < 2:
+                logger.warning(f"Network error fetching broker positions for {etf_symbol}. Retrying {attempt + 1}/3...")
+                time.sleep(2)
+            else:
+                logger.error(f"Failed to fetch positions for {etf_symbol} after 3 attempts. Aborting.")
+                raise e
+
+def _cap_sell_qty(
+    gw: GatewayBase,
+    etf_symbol: str,
+    trade_qty: float,
+    use_fractional: bool,
+) -> float:
+    """Cap sell size to broker long holdings and floor to avoid overshoot."""
+    available = _broker_long_qty(gw, etf_symbol)
+    if available <= 1e-9:
+        return trade_qty
+    capped = min(trade_qty, available)
+    if use_fractional:
+        return _floor_qty(capped, 4)
+    return float(math.floor(capped + 1e-12))
+
 
 def _fmt_qty(qty: float) -> str:
     """Format a quantity: integer display for whole numbers, 4 d.p. for fractional."""
