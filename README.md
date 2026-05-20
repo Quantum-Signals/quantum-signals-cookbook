@@ -2,6 +2,8 @@
 
 An algorithmic trading bot that streams real-time signals from [QuantumSignals](https://quantumsignals.io) and executes trades automatically through **Alpaca** (or Interactive Brokers).
 
+**Developer documentation:** see [documentation.md](documentation.md) for architecture, module map, position-sizing logic, and local development.
+
 ---
 
 ## Prerequisites
@@ -136,7 +138,7 @@ the *upcoming* day's file.
 | Variable | Default | Description |
 |---|---|---|
 | `SESSION_START_TIME` | `09:30` | Local time at which a new trading day resumes |
-| `SESSION_END_TIME`   | `16:00` | Local time at which positions are flattened and the daily summary is logged |
+| `SESSION_END_TIME`   | `15:55` | Local time at which positions are flattened and the daily summary is logged |
 | `SESSION_TIMEZONE`   | `America/New_York` | Timezone for the times above |
 | `RUN_DAYS`           | `0` | `0` = run indefinitely; `1` = exit after first EOD (legacy single-day behaviour); `N` = exit after N EODs |
 
