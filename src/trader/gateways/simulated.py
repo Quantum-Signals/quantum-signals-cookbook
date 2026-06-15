@@ -70,6 +70,7 @@ class SimulatedGateway(GatewayBase):
         action: str,
         qty: int,
         price: Optional[float] = None,
+        position_intent: Optional[str] = None,
     ) -> Optional[dict]:
         order_id = len(self._orders) + 1
         fill_price = price or self.get_last_price(contract) or 0.0

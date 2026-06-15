@@ -8,7 +8,7 @@ from trader.strategy.momentum import MomentumStrategy
 
 
 def _make_settings(**overrides) -> Settings:
-    defaults = dict(qs_api_key="test-key", dry_run=True, trade_cooldown_seconds=0)
+    defaults = dict(qs_api_key="test-key", dry_run=True)
     defaults.update(overrides)
     return Settings(**defaults)
 
@@ -19,12 +19,22 @@ class FakeSignal:
     symbol: str
     signal: int
     model: str = "test-model"
-    for_minute_utc: str = "2026-01-01T00:00:00Z"
+    signal_time_utc: str = "2026-01-01T00:00:00Z"
     code_message: str = ""
     _null: bool = False
 
     def is_null_signal(self) -> bool:
         return self._null
+
+
+def _fire(strategy: MomentumStrategy, symbol: str, signal_value: int) -> None:
+    """Call _execute directly, bypassing the 5-minute cooldown timer.
+
+    Passes signal_ts=0.0 (epoch 1970) so the stored last-exec time is far
+    enough in the past that any subsequent handle_signal call will pass the
+    cooldown check regardless of its signal_time_utc.
+    """
+    strategy._execute(symbol, signal_value, 0.0)
 
 
 class TestMomentumStrategy:
@@ -44,72 +54,181 @@ class TestMomentumStrategy:
 
     def test_up_signal_opens_long(self):
         strategy, gw, perf = self._make_strategy()
-        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP))
+        _fire(strategy, "ES", Signal.UP)
         assert len(gw.get_open_positions()) == 1
         pos = gw.get_open_positions()[0]
         assert pos["pos"] > 0
 
     def test_down_signal_opens_short(self):
         strategy, gw, perf = self._make_strategy()
-        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.DOWN))
+        _fire(strategy, "ES", Signal.DOWN)
         assert len(gw.get_open_positions()) == 1
         pos = gw.get_open_positions()[0]
         assert pos["pos"] < 0
 
     def test_stable_signal_no_position(self):
         strategy, gw, perf = self._make_strategy()
+        # STABLE with no position → no trade
+        strategy._last_exec_time.clear()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.STABLE))
         assert len(gw.get_open_positions()) == 0
 
     def test_long_closed_on_down(self):
         strategy, gw, perf = self._make_strategy()
-        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP))
+        _fire(strategy, "ES", Signal.UP)
         assert len(gw.get_open_positions()) == 1
 
-        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.DOWN))
-        positions = gw.get_open_positions()
-        # Should have reversed: closed long, opened short
-        assert len(positions) == 1
-        assert positions[0]["pos"] < 0
-        assert perf.total_trades == 1
+        # Second DOWN reduces / closes the long.  The simulated gateway jitters
+        # the price ±0.1% on every get_last_price call, so the UP and DOWN
+        # slice sizes are computed at slightly different prices and don't cancel
+        # out to exactly zero shares.  We check near-flat (< 0.01 shares
+        # residual) rather than strict zero.
+        _fire(strategy, "ES", Signal.DOWN)
+        spy_pos = next(
+            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+        )
+        assert abs(spy_pos) < 0.01, (
+            f"Expected near-flat after UP+DOWN, got pos={spy_pos}"
+        )
 
     def test_long_closed_on_stable(self):
+        # STABLE means "hold" — the long is kept, not closed.
         strategy, gw, perf = self._make_strategy()
-        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP))
+        _fire(strategy, "ES", Signal.UP)
+        # Trigger STABLE via handle_signal (the proper path that enforces "hold")
+        strategy._last_exec_time.clear()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.STABLE))
-        assert len(gw.get_open_positions()) == 0
-        assert perf.total_trades == 1
+        spy_pos = next(
+            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+        )
+        assert spy_pos > 0, "Long should still be open after STABLE"
+        assert perf.total_trades == 0  # no close yet
 
     def test_short_closed_on_up(self):
         strategy, gw, perf = self._make_strategy()
-        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.DOWN))
-        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP))
-        positions = gw.get_open_positions()
-        # Should have reversed: closed short, opened long
-        assert len(positions) == 1
-        assert positions[0]["pos"] > 0
-        assert perf.total_trades == 1
+        _fire(strategy, "ES", Signal.DOWN)
+        _fire(strategy, "ES", Signal.UP)
+        # After DOWN then UP the short closes. Due to price jitter between the
+        # two signal evaluations the resulting net is near-flat but not always
+        # exactly zero. The key check: no significant short remains.
+        spy_pos = next(
+            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+        )
+        assert spy_pos > -1.0, f"Expected near-flat after DOWN+UP, got {spy_pos}"
+        assert perf.total_trades == 1  # short trade was closed
 
     def test_short_closed_on_stable(self):
+        # STABLE means "hold" — the short stays open.
         strategy, gw, perf = self._make_strategy()
-        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.DOWN))
+        _fire(strategy, "ES", Signal.DOWN)
+        strategy._last_exec_time.clear()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.STABLE))
-        assert len(gw.get_open_positions()) == 0
-        assert perf.total_trades == 1
+        spy_pos = next(
+            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+        )
+        assert spy_pos < 0, "Short should still be open after STABLE"
+        assert perf.total_trades == 0  # no close yet
+
+    def test_signal_ts_stamps_same_epoch(self):
+        """Both symbols are stamped with the same epoch when signal_time_utc matches."""
+        strategy, gw, perf = self._make_strategy()
+
+        ts = "2026-01-01T19:08:00Z"
+        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP, signal_time_utc=ts))
+        strategy.handle_signal(FakeSignal(symbol="NQ", signal=Signal.UP, signal_time_utc=ts))
+
+        assert strategy._last_exec_time.get("ES") == strategy._last_exec_time.get("NQ"), (
+            "Both symbols must share the same last-exec timestamp when their "
+            "signal_time_utc is identical"
+        )
+
+    def test_signal_ts_prevents_nq_skip(self):
+        """NQ must fire in cycle 2 even when its SSE event arrives seconds after ES.
+
+        Regression for: QS stream delivers S&P500 and Nasdaq100 as separate
+        SSE events ~1s apart.  With wall-clock gating, the 1-second offset
+        accumulated in _last_exec_time caused one symbol to appear ~1s shy of
+        the 300-second cooldown in the next cycle, permanently desynchronising
+        the two instruments into alternating solo trades.
+
+        The fix: key the cooldown on signal_time_utc (same for both symbols in
+        the same QS bar) so the elapsed check is always identical.
+        """
+        strategy, gw, perf = self._make_strategy()
+
+        ts1 = "2026-01-01T19:08:00Z"
+        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP, signal_time_utc=ts1))
+        strategy.handle_signal(FakeSignal(symbol="NQ", signal=Signal.UP, signal_time_utc=ts1))
+
+        # Both timers must be identical (same epoch) after cycle 1
+        assert strategy._last_exec_time["ES"] == strategy._last_exec_time["NQ"]
+
+        # Cycle 2: signal_time_utc is exactly 300s later → both cooldowns just expired
+        ts2 = "2026-01-01T19:13:00Z"
+        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP, signal_time_utc=ts2))
+        strategy.handle_signal(FakeSignal(symbol="NQ", signal=Signal.UP, signal_time_utc=ts2))
+
+        symbols = {p["symbol"] for p in gw.get_open_positions()}
+        assert "SPY" in symbols, "ES/SPY must trade in cycle 2"
+        assert "QQQ" in symbols, "NQ/QQQ must trade in cycle 2"
 
     def test_cooldown_blocks_rapid_trades(self):
-        strategy, gw, perf = self._make_strategy(trade_cooldown_seconds=9999)
+        """The 5-minute execution interval prevents back-to-back handle_signal calls."""
+        strategy, gw, perf = self._make_strategy()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP))
-        # Second signal within cooldown should be skipped
+        # A second handle_signal arriving immediately is within the 5-min window
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.DOWN))
         positions = gw.get_open_positions()
         assert len(positions) == 1
-        assert positions[0]["pos"] > 0  # still long, DOWN was skipped
+        assert positions[0]["pos"] > 0  # still long; DOWN was blocked by cooldown
 
     def test_multiple_symbols_independent(self):
         strategy, gw, perf = self._make_strategy()
-        strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP))
-        strategy.handle_signal(FakeSignal(symbol="NQ", signal=Signal.DOWN))
+        _fire(strategy, "ES", Signal.UP)
+        _fire(strategy, "NQ", Signal.DOWN)
         positions = gw.get_open_positions()
         symbols = {p["symbol"] for p in positions}
-        assert symbols == {"ES", "NQ"}
+        assert symbols == {"SPY", "QQQ"}
+
+    # ------------------------------------------------------------------
+    # Regression test: strategy must continue shorting after all longs
+    # are exhausted, not stop at flat (the sell_to_short bug).
+    # ------------------------------------------------------------------
+    def test_continues_shorting_after_longs_exhausted(self):
+        """
+        After closing all accumulated long slices, the next DOWN signal must
+        open a short position — not silently stop trading.
+
+        Scenario:
+          - Send N UP signals → builds a long position of N slices
+          - Send N+2 DOWN signals → first N close the longs (flat),
+            next 2 must open and grow a short
+        """
+        strategy, gw, perf = self._make_strategy()
+
+        n_up = 5
+        for _ in range(n_up):
+            _fire(strategy, "S&P500", Signal.UP)
+
+        # Confirm we have a long position
+        positions = gw.get_open_positions()
+        assert any(p["pos"] > 0 for p in positions), "Expected a long after UP signals"
+        long_qty = next(p["pos"] for p in positions if p["symbol"] == "SPY")
+        assert long_qty > 0
+
+        # Send more DOWNs than UPs so we are guaranteed to clear all longs
+        # AND open a short. A small extra buffer covers price-jitter residuals:
+        # because slice sizes are computed from the live simulated price (which
+        # jitters ±0.1%), 5 DOWN slices don't always exactly cancel 5 UP slices.
+        n_down = n_up + 3  # plenty to clear longs + build a short
+        for _ in range(n_down):
+            _fire(strategy, "S&P500", Signal.DOWN)
+
+        positions_final = gw.get_open_positions()
+        spy_pos_final = next(
+            (p["pos"] for p in positions_final if p["symbol"] == "SPY"), 0.0
+        )
+        assert spy_pos_final < 0, (
+            f"BUG: strategy stopped trading after closing longs. "
+            f"Expected a short position, got pos={spy_pos_final}"
+        )

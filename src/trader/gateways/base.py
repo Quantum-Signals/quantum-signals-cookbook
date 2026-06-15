@@ -26,6 +26,7 @@ class GatewayBase(ABC):
         action: str,
         qty: int,
         price: Optional[float] = None,
+        position_intent: Optional[str] = None,
     ) -> Optional[object]: ...
 
     @abstractmethod

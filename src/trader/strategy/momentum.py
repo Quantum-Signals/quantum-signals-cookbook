@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from datetime import datetime, timezone
 
 from loguru import logger
 from requests.exceptions import ReadTimeout, ConnectionError
@@ -207,8 +208,13 @@ class MomentumStrategy(StrategyBase):
         self.perf.signal_counts[sig] += 1
         logger.info(f"Signal  {sym}  {_sig_label(sig)}  model={signal.model}  ts={ts}")
 
-        now = time.monotonic()
-        elapsed = now - self._last_exec_time.get(sym, 0)
+        # Gate on the signal's own timestamp rather than wall-clock time.
+        # S&P500 and Nasdaq100 signals for the same QS bar share an identical
+        # signal_time_utc, so both always evaluate the cooldown against the
+        # same reference — regardless of when their SSE events arrived or how
+        # long the previous symbol's order took to fill.
+        signal_ts = _signal_ts_epoch(ts)
+        elapsed = signal_ts - self._last_exec_time.get(sym, 0.0)
         if elapsed < self._interval_s:
             remaining = self._interval_s - elapsed
             logger.debug(
@@ -219,16 +225,20 @@ class MomentumStrategy(StrategyBase):
         if sig == Signal.STABLE:
             net = self._net_qty.get(sym, 0.0)
             logger.info(f"  -> STABLE — holding {sym} (net: {_fmt_signed_qty(net)})")
-            self._last_exec_time[sym] = now
+            self._last_exec_time[sym] = signal_ts
             return
 
-        self._execute(sym, sig, now)
+        self._execute(sym, sig, signal_ts)
 
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
-    def _execute(self, sym: str, sig: int, now: float) -> None:
+    def _execute(self, sym: str, sig: int, signal_ts: float) -> None:
         """Drive ``_net_qty[sym]`` toward a feasible target net position.
+
+        ``signal_ts`` is the QS signal's UTC epoch (seconds since 1970) and is
+        stored in ``_last_exec_time`` so the next cooldown check compares
+        signal timestamps — not wall-clock arrival times.
 
         The "ideal" net position is purely numeric: each UP slice adds
         ``+qty`` (a fractional share), each DOWN slice adds ``-qty``. The
@@ -298,7 +308,7 @@ class MomentumStrategy(StrategyBase):
             target_net = float(round(ideal_net))
             new_reserve = 0.0
 
-        self._last_exec_time[sym] = now
+        self._last_exec_time[sym] = signal_ts
 
         delta = target_net - prev_net
 
@@ -316,20 +326,29 @@ class MomentumStrategy(StrategyBase):
         trade_qty = abs(delta)
         signed_trade_qty = delta
         new_net = target_net
+        position_intent: str | None = None
 
         if action == "SELL":
-            requested_qty = trade_qty
-            trade_qty = _cap_sell_qty(self.gw, trade_sym, trade_qty, self._use_fractional)
-            if trade_qty < 1e-9:
-                logger.warning(
-                    f"  -> No long shares available to sell for {trade_sym} — skipping"
-                )
-                return
-            if trade_qty < requested_qty - 1e-9:
-                logger.info(
-                    f"  -> Capped SELL {_fmt_qty(requested_qty)} → {_fmt_qty(trade_qty)} "
-                    f"(broker long available)"
-                )
+            if prev_net > 0:
+                # Cap sells to available broker longs to prevent overselling and
+                # accidental fractional-short creation (Alpaca error 42210000).
+                requested_qty = trade_qty
+                trade_qty = _cap_sell_qty(self.gw, trade_sym, trade_qty, self._use_fractional)
+                if trade_qty < 1e-9:
+                    logger.warning(
+                        f"  -> No long shares available to sell for {trade_sym} — skipping"
+                    )
+                    return
+                if trade_qty < requested_qty - 1e-9:
+                    logger.info(
+                        f"  -> Capped SELL {_fmt_qty(requested_qty)} → {_fmt_qty(trade_qty)} "
+                        f"(broker long available)"
+                    )
+                position_intent = "close"
+            else:
+                # Flat or already short → opening / adding to a short position.
+                # Do NOT cap: there are no long shares to protect here.
+                position_intent = "open"
             signed_trade_qty = -trade_qty
             new_net = prev_net + signed_trade_qty
 
@@ -340,7 +359,7 @@ class MomentumStrategy(StrategyBase):
         )
         goes_flat = prev_net != 0 and abs(new_net) < 1e-9
 
-        trade = self.gw.place_order(contract, action, trade_qty, price)
+        trade = self.gw.place_order(contract, action, trade_qty, price, position_intent=position_intent)
         if trade is None:
             return
 
@@ -391,6 +410,27 @@ class MomentumStrategy(StrategyBase):
 # Helpers
 # ------------------------------------------------------------------
 
+def _signal_ts_epoch(signal_time_utc: object) -> float:
+    """Return *signal_time_utc* as a UTC epoch float (seconds since 1970-01-01).
+
+    Handles the three forms the QS client may produce:
+      - a tz-aware/naive ``datetime`` object
+      - an ``int`` or ``float`` already in epoch seconds
+      - an ISO-8601 string (with or without trailing "Z")
+    """
+    if isinstance(signal_time_utc, datetime):
+        dt = (
+            signal_time_utc
+            if signal_time_utc.tzinfo
+            else signal_time_utc.replace(tzinfo=timezone.utc)
+        )
+        return dt.timestamp()
+    if isinstance(signal_time_utc, (int, float)):
+        return float(signal_time_utc)
+    raw = str(signal_time_utc).replace("Z", "+00:00")
+    return datetime.fromisoformat(raw).timestamp()
+
+
 def _floor_qty(qty: float, decimals: int = 4) -> float:
     """Round down so order size never exceeds broker holdings (float-safe)."""
     if qty <= 0:
@@ -421,14 +461,27 @@ def _cap_sell_qty(
     trade_qty: float,
     use_fractional: bool,
 ) -> float:
-    """Cap sell size to broker long holdings and floor to avoid overshoot."""
+    """Cap sell size to broker long holdings and floor to avoid overshoot.
+
+    If the broker residual is smaller than the minimum orderable lot (floors
+    to zero), the residual is negligible and the cap is bypassed entirely so
+    the strategy can open its short position.  In production the broker will
+    either net out the sub-lot residual automatically or reject with 42210000
+    (fractional-short guard), which is already handled gracefully upstream.
+    """
     available = _broker_long_qty(gw, etf_symbol)
     if available <= 1e-9:
         return trade_qty
     capped = min(trade_qty, available)
     if use_fractional:
-        return _floor_qty(capped, 4)
-    return float(math.floor(capped + 1e-12))
+        floored = _floor_qty(capped, 4)
+    else:
+        floored = float(math.floor(capped + 1e-12))
+    if floored <= 1e-9:
+        # Residual is below the minimum quantizable lot — treat as flat and
+        # allow the full short sell rather than blocking indefinitely.
+        return trade_qty
+    return floored
 
 
 def _fmt_qty(qty: float) -> str:

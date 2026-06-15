@@ -176,6 +176,7 @@ class IBGateway(GatewayBase):
         action: str,
         qty: int,
         price: Optional[float] = None,
+        position_intent: Optional[str] = None,
     ) -> Optional[object]:
         from ib_async import LimitOrder, MarketOrder
 

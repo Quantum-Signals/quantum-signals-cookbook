@@ -138,12 +138,19 @@ class AlpacaGateway(GatewayBase):
         action: str,
         qty: int | float,
         price: Optional[float] = None,
+        position_intent: Optional[str] = None,
     ) -> Optional[dict]:
-        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.enums import OrderSide, PositionIntent, TimeInForce
         from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
         ticker = contract
         side = OrderSide.BUY if action.upper() == "BUY" else OrderSide.SELL
+
+        alpaca_intent: Optional[PositionIntent] = None
+        if position_intent == "open" and side == OrderSide.SELL:
+            alpaca_intent = PositionIntent.SELL_TO_OPEN
+        elif position_intent == "close" and side == OrderSide.SELL:
+            alpaca_intent = PositionIntent.SELL_TO_CLOSE
 
         if self._settings.use_market_orders or price is None:
             req = MarketOrderRequest(
@@ -151,6 +158,7 @@ class AlpacaGateway(GatewayBase):
                 qty=qty,
                 side=side,
                 time_in_force=TimeInForce.DAY,
+                position_intent=alpaca_intent,
             )
             order_type = "MKT"
         else:
@@ -160,6 +168,7 @@ class AlpacaGateway(GatewayBase):
                 side=side,
                 time_in_force=TimeInForce.DAY,
                 limit_price=price,
+                position_intent=alpaca_intent,
             )
             order_type = f"LMT@{price}"
 
