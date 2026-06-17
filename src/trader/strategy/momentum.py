@@ -213,7 +213,10 @@ class MomentumStrategy(StrategyBase):
         # signal_time_utc, so both always evaluate the cooldown against the
         # same reference — regardless of when their SSE events arrived or how
         # long the previous symbol's order took to fill.
-        signal_ts = _signal_ts_epoch(ts)
+        # Floor to whole seconds: QS timestamps can carry sub-second fractions
+        # that aren't visible in the log but cause the 5-min boundary to be
+        # missed by <1 s, making the effective interval 6 min instead of 5 min.
+        signal_ts = math.floor(_signal_ts_epoch(ts))
         elapsed = signal_ts - self._last_exec_time.get(sym, 0.0)
         if elapsed < self._interval_s:
             remaining = self._interval_s - elapsed
