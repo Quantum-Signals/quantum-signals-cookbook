@@ -14,6 +14,11 @@ from trader.strategy.base import StrategyBase
 
 _TRADING_MINUTES_PER_DAY = 390  # 6.5 hours for US equities
 
+# Positions at or below this size are treated as flat for sell routing. Alpaca
+# often retains sub-lot long dust after fractional unwinds; without splitting
+# close + open orders Alpaca rejects a single sell_to_close for qty >> dust.
+_DUST_QTY = 1e-4
+
 _SIGNAL_TO_TRADE: dict[str, str] = {
     # QS client < 0.5.1 used futures tickers; >= 0.5.1 uses full names
     "ES": "SPY",
@@ -327,46 +332,28 @@ class MomentumStrategy(StrategyBase):
 
         action = "BUY" if delta > 0 else "SELL"
         trade_qty = abs(delta)
-        signed_trade_qty = delta
         new_net = target_net
-        position_intent: str | None = None
 
         if action == "SELL":
-            if prev_net > 0:
-                # Cap sells to available broker longs to prevent overselling and
-                # accidental fractional-short creation (Alpaca error 42210000).
-                requested_qty = trade_qty
-                trade_qty = _cap_sell_qty(self.gw, trade_sym, trade_qty, self._use_fractional)
-                if trade_qty < 1e-9:
-                    logger.warning(
-                        f"  -> No long shares available to sell for {trade_sym} — skipping"
-                    )
-                    return
-                if trade_qty < requested_qty - 1e-9:
-                    logger.info(
-                        f"  -> Capped SELL {_fmt_qty(requested_qty)} → {_fmt_qty(trade_qty)} "
-                        f"(broker long available)"
-                    )
-                position_intent = "close"
-            else:
-                # Flat or already short → opening / adding to a short position.
-                # Do NOT cap: there are no long shares to protect here.
-                position_intent = "open"
-            signed_trade_qty = -trade_qty
-            new_net = prev_net + signed_trade_qty
+            if not self._execute_sell(
+                sym, trade_sym, contract, price, prev_net, target_net,
+                trade_qty, new_reserve,
+            ):
+                return
+            return
 
-        crosses_zero = (
-            prev_net != 0
-            and (prev_net > 0) != (new_net > 0)
-            and abs(new_net) >= 1e-9
-        )
-        goes_flat = prev_net != 0 and abs(new_net) < 1e-9
-
-        trade = self.gw.place_order(contract, action, trade_qty, price, position_intent=position_intent)
+        trade = self.gw.place_order(contract, action, trade_qty, price)
         if trade is None:
             return
 
         self._position_reserve[sym] = new_reserve
+        signed_trade_qty = trade_qty
+
+        crosses_zero = (
+            prev_net < -1e-9
+            and new_net > _DUST_QTY
+        )
+        goes_flat = prev_net < -1e-9 and abs(new_net) <= _DUST_QTY
 
         if goes_flat or crosses_zero:
             self._record_pnl(sym, price, prev_net, close_qty=prev_net)
@@ -391,6 +378,102 @@ class MomentumStrategy(StrategyBase):
             f"(net: {_fmt_signed_qty(prev_net)} → {_fmt_signed_qty(new_net)})"
             f"{reserve_note}"
         )
+
+    def _execute_sell(
+        self,
+        sym: str,
+        trade_sym: str,
+        contract: object,
+        price: float,
+        prev_net: float,
+        target_net: float,
+        trade_qty: float,
+        new_reserve: float,
+    ) -> bool:
+        """Place one or two SELL orders (close long/dust, then open short if needed).
+
+        Alpaca requires separate sell_to_close and sell_to_open orders when
+        crossing from long through flat into a short. A single sell_to_close for
+        the combined qty fails with insufficient qty if only dust remains long.
+        """
+        broker_long = _broker_long_qty(self.gw, trade_sym)
+        ending_short = target_net < -_DUST_QTY
+        has_long = prev_net > 1e-9 or broker_long > 1e-9
+
+        if ending_short and has_long:
+            close_qty = _close_long_qty(prev_net, broker_long, self._use_fractional)
+            open_qty = abs(target_net)
+            legs: list[tuple[float, str]] = []
+            if close_qty > 1e-9:
+                legs.append((close_qty, "close"))
+            if open_qty > _DUST_QTY:
+                legs.append((open_qty, "open"))
+        elif prev_net > 1e-9:
+            requested_qty = trade_qty
+            close_qty = _cap_sell_qty(
+                self.gw, trade_sym, trade_qty, self._use_fractional,
+            )
+            if close_qty < 1e-9:
+                logger.warning(
+                    f"  -> No long shares available to sell for {trade_sym} — skipping"
+                )
+                return False
+            if close_qty < requested_qty - 1e-9:
+                logger.info(
+                    f"  -> Capped SELL {_fmt_qty(requested_qty)} → {_fmt_qty(close_qty)} "
+                    f"(broker long available)"
+                )
+            legs = [(close_qty, "close")]
+        else:
+            legs = [(trade_qty, "open")]
+
+        new_net = prev_net
+        running_net = prev_net
+        for leg_qty, intent in legs:
+            trade = self.gw.place_order(
+                contract, "SELL", leg_qty, price, position_intent=intent,
+            )
+            if trade is None:
+                return False
+            next_net = running_net - leg_qty
+            intent_label = "close" if intent == "close" else "short"
+            logger.info(
+                f"  -> SELL {_fmt_qty(leg_qty)}x {trade_sym} @ {price:.2f}  "
+                f"notional=${leg_qty * price:,.2f}  ({intent_label})  [signal={sym}]  "
+                f"(net: {_fmt_signed_qty(running_net)} → {_fmt_signed_qty(next_net)})"
+            )
+            running_net = next_net
+        new_net = running_net
+
+        self._position_reserve[sym] = new_reserve
+
+        crosses_zero = (
+            prev_net > 1e-9
+            and new_net < -_DUST_QTY
+        )
+        goes_flat = prev_net > 1e-9 and abs(new_net) <= _DUST_QTY
+
+        if goes_flat or crosses_zero:
+            self._record_pnl(sym, price, prev_net, close_qty=prev_net)
+            if crosses_zero:
+                self._net_qty[sym] = new_net
+                self._total_cost[sym] = new_net * price
+            else:
+                self._net_qty[sym] = 0.0
+                self._total_cost[sym] = 0.0
+        else:
+            self._net_qty[sym] = new_net
+            signed_delta = new_net - prev_net
+            self._total_cost[sym] = self._total_cost.get(sym, 0.0) + signed_delta * price
+
+        reserve_note = (
+            f"  (reserve: {_fmt_signed_qty(new_reserve)})"
+            if abs(new_reserve) > 1e-9
+            else ""
+        )
+        if reserve_note:
+            logger.info(f"  ->{reserve_note.lstrip()}")
+        return True
 
     def _record_pnl(
         self, sym: str, exit_price: float, prev_net: float, close_qty: float
@@ -458,20 +541,34 @@ def _broker_long_qty(gw: GatewayBase, etf_symbol: str) -> float:
                 logger.error(f"Failed to fetch positions for {etf_symbol} after 3 attempts. Aborting.")
                 raise e
 
+def _close_long_qty(
+    prev_net: float,
+    broker_long: float,
+    use_fractional: bool,
+) -> float:
+    """Shares to sell with sell_to_close before opening a short."""
+    if prev_net > 1e-9:
+        raw = min(prev_net, broker_long) if broker_long > 1e-9 else prev_net
+    elif broker_long > 1e-9:
+        raw = broker_long
+    else:
+        return 0.0
+
+    if use_fractional:
+        floored = _floor_qty(raw, 4)
+        if floored <= 1e-9 and broker_long > 1e-9:
+            return _floor_qty(broker_long, 4)
+        return floored
+    return float(math.floor(raw + 1e-12))
+
+
 def _cap_sell_qty(
     gw: GatewayBase,
     etf_symbol: str,
     trade_qty: float,
     use_fractional: bool,
 ) -> float:
-    """Cap sell size to broker long holdings and floor to avoid overshoot.
-
-    If the broker residual is smaller than the minimum orderable lot (floors
-    to zero), the residual is negligible and the cap is bypassed entirely so
-    the strategy can open its short position.  In production the broker will
-    either net out the sub-lot residual automatically or reject with 42210000
-    (fractional-short guard), which is already handled gracefully upstream.
-    """
+    """Cap sell size to broker long holdings and floor to avoid overshoot."""
     available = _broker_long_qty(gw, etf_symbol)
     if available <= 1e-9:
         return trade_qty
@@ -481,8 +578,9 @@ def _cap_sell_qty(
     else:
         floored = float(math.floor(capped + 1e-12))
     if floored <= 1e-9:
-        # Residual is below the minimum quantizable lot — treat as flat and
-        # allow the full short sell rather than blocking indefinitely.
+        # Broker holds sub-lot dust that floors to zero — sell the dust itself.
+        if available > 1e-9:
+            return _floor_qty(available, 4) if use_fractional else available
         return trade_qty
     return floored
 

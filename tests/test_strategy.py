@@ -232,3 +232,40 @@ class TestMomentumStrategy:
             f"BUG: strategy stopped trading after closing longs. "
             f"Expected a short position, got pos={spy_pos_final}"
         )
+
+    def test_dust_long_to_short(self):
+        """Regression: fractional dust at broker must not block sell_to_open."""
+        strategy, gw, perf = self._make_strategy(broker="alpaca")
+        gw._sim_positions["SPY"] = {"pos": 0.0001, "avg_cost": 745.0}
+        strategy._net_qty["S&P500"] = 0.0001
+        strategy._total_cost["S&P500"] = 0.0001 * 745.0
+        strategy._position_reserve["S&P500"] = -0.5
+
+        _fire(strategy, "S&P500", Signal.DOWN)
+
+        spy_pos = next(
+            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+        )
+        assert spy_pos < 0, (
+            f"Expected short after dust long + DOWN, got pos={spy_pos}"
+        )
+
+    def test_long_to_short_crosses_zero(self):
+        """Regression: long → short must use close then open, not one close order."""
+        strategy, gw, perf = self._make_strategy(broker="alpaca")
+
+        for _ in range(3):
+            _fire(strategy, "S&P500", Signal.UP)
+
+        long_qty = next(p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY")
+        assert long_qty > 0
+
+        for _ in range(4):
+            _fire(strategy, "S&P500", Signal.DOWN)
+
+        spy_pos = next(
+            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+        )
+        assert spy_pos < 0, (
+            f"Expected short after long unwound, got pos={spy_pos}"
+        )
