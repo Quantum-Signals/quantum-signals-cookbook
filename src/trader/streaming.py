@@ -5,7 +5,7 @@ import threading
 import time
 
 from loguru import logger
-from quantumsignals.client import Client as QSClient, APIError, APIKeyError
+from quantumsignals.client import Client as QSClient, APIError, APIKeyError, APIVersionRemovedError
 
 from trader.config import Settings
 
@@ -50,6 +50,13 @@ def stream_signals_thread(
 
             except APIKeyError as exc:
                 logger.critical(f"Invalid QuantumSignals API key: {exc}")
+                stop_event.set()
+                return
+
+            except APIVersionRemovedError as exc:
+                logger.critical(
+                    f"QS client is too old — API version removed (upgrade quantumsignals-client): {exc}"
+                )
                 stop_event.set()
                 return
 

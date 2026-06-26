@@ -25,10 +25,17 @@ _SIGNAL_TO_TRADE: dict[str, str] = {
     "NQ": "QQQ",
     "S&P500": "SPY",
     "Nasdaq100": "QQQ",
+    # v3 endpoint (client >= 0.6.0) may emit the ETF ticker directly as symbol
+    "SPY": "SPY",
+    "QQQ": "QQQ",
 }
 
-# Reverse map: ETF ticker → QS signal symbol (used by sync_positions)
-_TRADE_TO_SIGNAL: dict[str, str] = {v: k for k, v in _SIGNAL_TO_TRADE.items()}
+# Reverse map: ETF ticker → canonical QS signal symbol (used by sync_positions).
+# Prefer the futures-ticker key so internal state stays consistent with older logs.
+_TRADE_TO_SIGNAL: dict[str, str] = {
+    "SPY": "ES",
+    "QQQ": "NQ",
+}
 
 
 def _compute_order_qty(

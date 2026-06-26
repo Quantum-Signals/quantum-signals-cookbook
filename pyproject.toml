@@ -9,7 +9,7 @@ dependencies = [
     "ib-async>=2.0.0",
     "loguru>=0.7.3",
     "python-dotenv>=1.2.2",
-    "quantumsignals-client>=0.4.0",
+    "quantumsignals-client>=0.6.0",
 ]
 
 [project.scripts]
