@@ -2,22 +2,27 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Optional
 
 from loguru import logger
 from requests.exceptions import ReadTimeout, ConnectionError
 from urllib3.exceptions import ProtocolError
 from trader.config import Settings
-from trader.gateways.base import GatewayBase
+from trader.gateways.base import GatewayBase, normalize_position_side
 from trader.models import PerformanceTracker, Signal
 from trader.strategy.base import StrategyBase
 
 _TRADING_MINUTES_PER_DAY = 390  # 6.5 hours for US equities
 
-# Positions at or below this size are treated as flat for sell routing. Alpaca
-# often retains sub-lot long dust after fractional unwinds; without splitting
-# close + open orders Alpaca rejects a single sell_to_close for qty >> dust.
+# Positions at or below this size are treated as flat when deciding whether an
+# open leg may follow a close leg. Alpaca often retains sub-lot dust after
+# fractional unwinds; anything at or below this is closeable but not blocking.
 _DUST_QTY = 1e-4
+# Broker can still report positions below _DUST_QTY (e.g. 1e-8 short); those
+# must still be closed before opening the opposite side.
+_BROKER_EPS = 1e-9
 
 _SIGNAL_TO_TRADE: dict[str, str] = {
     # QS client < 0.5.1 used futures tickers; >= 0.5.1 uses full names
@@ -63,6 +68,15 @@ def _compute_order_qty(
     return float(max(1, round(raw)))
 
 
+@dataclass(frozen=True)
+class _Leg:
+    """One order needed to move the broker position toward the target."""
+
+    action: str  # "BUY" | "SELL"
+    qty: float  # unsigned
+    intent: str  # "close" | "open"
+
+
 class MomentumStrategy(StrategyBase):
     """
     Incremental momentum strategy that decides and executes at a
@@ -76,11 +90,26 @@ class MomentumStrategy(StrategyBase):
         DOWN   → SELL qty  (net position -= qty)
         STABLE → hold      (no trade, timer still resets)
 
-    When the broker is Alpaca, fractional share quantities are computed so
-    each order matches the per-execution budget exactly.  For other brokers
-    quantities are rounded to the nearest whole share (min 1).
+    Execution reconciles to a target rather than trading blind deltas.
+    Every execution:
 
-    Positions accumulate over time.
+      1. fetches the broker's actual position (the only source of truth),
+      2. computes the feasible target = broker position + reserve + slice,
+         snapped to a whole share on the short side (Alpaca forbids
+         fractional shorts, code 42210000),
+      3. derives at most two legs (close the opposite side, then open) via
+         ``_plan_legs``, and
+      4. places them; if a leg fails, the remainder of the slice is dropped
+         and the next execution re-plans from broker truth.
+
+    Because every tick re-reads the broker, state drift (failed orders,
+    manual trades, partial fills, restarts) self-heals instead of compounding.
+
+    The per-symbol ``_position_reserve`` carries the fractional remainder
+    between the ideal (continuous) position and the whole-share position the
+    broker can hold on the short side; it drains naturally as the ideal
+    crosses integer boundaries.  Invariant: ideal = broker + reserve, with
+    reserve = 0 while the ideal is non-negative.
     """
 
     def __init__(
@@ -108,23 +137,14 @@ class MomentumStrategy(StrategyBase):
         n_symbols = max(len(active_symbols), 1)
         self._target_daily_notional_per_symbol = settings.daily_start_capital / n_symbols
 
+        # Last known broker position / cost basis, refreshed from the broker
+        # on every execution and by sync_positions().  Used for STABLE logging
+        # and as a PnL fallback — never as the basis for order sizing.
         self._net_qty: dict[str, float] = {}
         self._total_cost: dict[str, float] = {}
         self._last_exec_time: dict[str, float] = {}
-
-        # Per-symbol "fractional reserve" carrying the difference between the
-        # strategy's *ideal* (continuous) net position and what the broker can
-        # actually hold. Alpaca rejects any order whose resulting position is a
-        # fractional short (code 42210000), so when the ideal is negative we
-        # snap the broker-side position to the nearest whole share and park
-        # the leftover here. The reserve drains naturally on the next signal:
-        # if the ideal crosses an integer boundary, the next order lands at
-        # the new target and the reserve updates accordingly.
-        #
-        # Invariant: ideal_net = actual_net + reserve. Reserve is 0 when the
-        # ideal is non-negative (fractional longs are held exactly), and lives
-        # in roughly [-0.5, +0.5] otherwise.
         self._position_reserve: dict[str, float] = {}
+        self._last_sync_time: float = 0.0
 
         execs_per_day = _TRADING_MINUTES_PER_DAY // self._interval_minutes
         logger.info(
@@ -161,10 +181,16 @@ class MomentumStrategy(StrategyBase):
         broker (e.g. EOD orders that filled overnight, manual closes) no longer
         linger in strategy state. Cooldown timers in ``_last_exec_time`` are
         preserved.
+
+        State is only cleared after a successful broker fetch so a network
+        failure cannot leave the strategy thinking it is flat while the broker
+        still holds positions (July 2026).
         """
-        self._net_qty.clear()
-        self._total_cost.clear()
-        self._position_reserve.clear()
+        now = time.perf_counter()
+        if now - self._last_sync_time < 5.0:
+            logger.debug("Skipping sync — already synced within last 5 seconds")
+            return
+        self._last_sync_time = now
 
         pos_list = []
         for attempt in range(3):
@@ -179,6 +205,10 @@ class MomentumStrategy(StrategyBase):
                     logger.error("Failed to sync positions after 3 attempts. Aborting.")
                     raise e
 
+        self._net_qty.clear()
+        self._total_cost.clear()
+        self._position_reserve.clear()
+
         for p in pos_list:
             etf_sym = p["symbol"]
             # Internal state is keyed by QS signal symbol ("ES"/"NQ"), not the
@@ -187,6 +217,12 @@ class MomentumStrategy(StrategyBase):
             qty = float(p["qty"])
             avg_price = p["avg_price"]
             if qty == 0:
+                continue
+            if abs(qty) <= _DUST_QTY and qty < 0:
+                logger.info(
+                    f"  Ignoring dust SHORT {_fmt_qty(abs(qty))}x {etf_sym} "
+                    f"@ {avg_price:.2f} — treating as flat"
+                )
                 continue
             self._net_qty[sig_sym] = qty
             self._total_cost[sig_sym] = qty * avg_price
@@ -246,33 +282,14 @@ class MomentumStrategy(StrategyBase):
         self._execute(sym, sig, signal_ts)
 
     # ------------------------------------------------------------------
-    # Execution
+    # Execution — reconcile the broker position to the target
     # ------------------------------------------------------------------
     def _execute(self, sym: str, sig: int, signal_ts: float) -> None:
-        """Drive ``_net_qty[sym]`` toward a feasible target net position.
+        """Move the broker position for *sym* toward this tick's target.
 
         ``signal_ts`` is the QS signal's UTC epoch (seconds since 1970) and is
         stored in ``_last_exec_time`` so the next cooldown check compares
         signal timestamps — not wall-clock arrival times.
-
-        The "ideal" net position is purely numeric: each UP slice adds
-        ``+qty`` (a fractional share), each DOWN slice adds ``-qty``. The
-        *feasible* position is what the broker can actually hold:
-
-        - Long side (>= 0): fractional shares are fine on Alpaca, integer on
-          IBKR.
-        - Short side (< 0): Alpaca forbids fractional shorts (code 42210000),
-          so we snap the broker-side position to the **nearest** whole share
-          (``round``) and park the leftover (in ``[-0.5, +0.5)``) in
-          ``_position_reserve``. The reserve carries to the next signal so
-          the next order naturally lands at the new whole-share target.
-
-        Invariant: ``ideal_net == self._net_qty[sym] + self._position_reserve[sym]``.
-
-        The order placed each call is just ``feasible_target - current_net``:
-        any size on the long side (fractional ok), whole-share size on the
-        short side, and zero on slices where the reserve hasn't crossed an
-        integer boundary yet.
         """
         trade_sym = _SIGNAL_TO_TRADE[sym]
         contract = self.gw.resolve_contract(trade_sym)
@@ -283,19 +300,7 @@ class MomentumStrategy(StrategyBase):
             )
             return
 
-        # Safely fetch price with retry logic for disconnected/stale connections
-        price = None
-        for attempt in range(3):
-            try:
-                price = self.gw.get_last_price(contract)
-                break  # Success, break out of the retry loop
-            except (ConnectionError, ProtocolError) as e:
-                if attempt < 2:
-                    logger.warning(f"  -> Connection dropped fetching {trade_sym} price. Retrying {attempt + 1}/3...")
-                    time.sleep(2)
-                else:
-                    logger.error(f"  -> Failed to fetch price for {trade_sym} after 3 attempts.")
-                    
+        price = self._fetch_price(trade_sym, contract)
         if price is None:
             logger.warning(f"  -> No market data for {trade_sym} — skipping")
             return
@@ -307,200 +312,304 @@ class MomentumStrategy(StrategyBase):
         )
         signed_slice = slice_qty if sig == Signal.UP else -slice_qty
 
-        prev_net = self._net_qty.get(sym, 0.0)
-        prev_reserve = self._position_reserve.get(sym, 0.0)
-
-        ideal_net = prev_net + prev_reserve + signed_slice
-
-        if self._use_fractional:
-            if ideal_net >= -1e-9:
-                target_net = max(0.0, ideal_net)
-                new_reserve = 0.0
-            else:
-                target_net = float(round(ideal_net))
-                new_reserve = ideal_net - target_net
-        else:
-            target_net = float(round(ideal_net))
-            new_reserve = 0.0
-
         self._last_exec_time[sym] = signal_ts
 
-        delta = target_net - prev_net
+        # The broker is the only source of truth for the current position.
+        current, avail_close, avg_entry = _broker_state(self.gw, trade_sym)
 
-        if abs(delta) < 1e-9:
-            self._position_reserve[sym] = new_reserve
+        known = self._net_qty.get(sym, 0.0)
+        if abs(current - known) > _DUST_QTY:
+            logger.warning(
+                f"  -> {trade_sym} drift: strategy believed "
+                f"{_fmt_signed_qty(known)}, broker holds {_fmt_signed_qty(current)} "
+                f"— planning from broker"
+            )
+
+        reserve = self._position_reserve.get(sym, 0.0)
+        ideal = current + reserve + signed_slice
+        target, new_reserve = _snap_target(ideal, self._use_fractional)
+        self._position_reserve[sym] = new_reserve
+
+        legs = _plan_legs(current, target, avail_close, self._use_fractional)
+
+        if not legs:
             direction = "short" if signed_slice < 0 else "long"
             logger.info(
                 f"  -> No order for {trade_sym}: accumulating {direction} intent "
                 f"(reserve={_fmt_signed_qty(new_reserve)}, "
-                f"net stays at {_fmt_signed_qty(prev_net)})"
+                f"net stays at {_fmt_signed_qty(current)})"
             )
+            self._settle(sym, price, current, avg_entry, current)
             return
 
-        action = "BUY" if delta > 0 else "SELL"
-        trade_qty = abs(delta)
-        new_net = target_net
-
-        if action == "SELL":
-            if not self._execute_sell(
-                sym, trade_sym, contract, price, prev_net, target_net,
-                trade_qty, new_reserve,
-            ):
-                return
-            return
-
-        trade = self.gw.place_order(contract, action, trade_qty, price)
-        if trade is None:
-            return
-
-        self._position_reserve[sym] = new_reserve
-        signed_trade_qty = trade_qty
-
-        crosses_zero = (
-            prev_net < -1e-9
-            and new_net > _DUST_QTY
-        )
-        goes_flat = prev_net < -1e-9 and abs(new_net) <= _DUST_QTY
-
-        if goes_flat or crosses_zero:
-            self._record_pnl(sym, price, prev_net, close_qty=prev_net)
-            if crosses_zero:
-                self._net_qty[sym] = new_net
-                self._total_cost[sym] = new_net * price
-            else:
-                self._net_qty[sym] = 0.0
-                self._total_cost[sym] = 0.0
-        else:
-            self._net_qty[sym] = new_net
-            self._total_cost[sym] = self._total_cost.get(sym, 0.0) + signed_trade_qty * price
-
-        reserve_note = (
-            f"  (reserve: {_fmt_signed_qty(new_reserve)})"
-            if abs(new_reserve) > 1e-9
-            else ""
-        )
-        logger.info(
-            f"  -> {action} {_fmt_qty(trade_qty)}x {trade_sym} @ {price:.2f}  "
-            f"notional=${trade_qty * price:,.2f}  [signal={sym}]  "
-            f"(net: {_fmt_signed_qty(prev_net)} → {_fmt_signed_qty(new_net)})"
-            f"{reserve_note}"
-        )
-
-    def _execute_sell(
-        self,
-        sym: str,
-        trade_sym: str,
-        contract: object,
-        price: float,
-        prev_net: float,
-        target_net: float,
-        trade_qty: float,
-        new_reserve: float,
-    ) -> bool:
-        """Place one or two SELL orders (close long/dust, then open short if needed).
-
-        Alpaca requires separate sell_to_close and sell_to_open orders when
-        crossing from long through flat into a short. A single sell_to_close for
-        the combined qty fails with insufficient qty if only dust remains long.
-        """
-        broker_long = _broker_long_qty(self.gw, trade_sym)
-        ending_short = target_net < -_DUST_QTY
-        has_long = prev_net > 1e-9 or broker_long > 1e-9
-
-        if ending_short and has_long:
-            close_qty = _close_long_qty(prev_net, broker_long, self._use_fractional)
-            open_qty = abs(target_net)
-            legs: list[tuple[float, str]] = []
-            if close_qty > 1e-9:
-                legs.append((close_qty, "close"))
-            if open_qty > _DUST_QTY:
-                legs.append((open_qty, "open"))
-        elif prev_net > 1e-9:
-            requested_qty = trade_qty
-            close_qty = _cap_sell_qty(
-                self.gw, trade_sym, trade_qty, self._use_fractional,
-            )
-            if close_qty < 1e-9:
-                logger.warning(
-                    f"  -> No long shares available to sell for {trade_sym} — skipping"
-                )
-                return False
-            if close_qty < requested_qty - 1e-9:
-                logger.info(
-                    f"  -> Capped SELL {_fmt_qty(requested_qty)} → {_fmt_qty(close_qty)} "
-                    f"(broker long available)"
-                )
-            legs = [(close_qty, "close")]
-        else:
-            legs = [(trade_qty, "open")]
-
-        new_net = prev_net
-        running_net = prev_net
-        for leg_qty, intent in legs:
+        new_net = current
+        prev_intent: Optional[str] = None
+        for leg in legs:
+            if leg.intent == "open" and prev_intent == "close":
+                if not _wait_opposite_cleared(self.gw, trade_sym, leg.action):
+                    logger.warning(
+                        f"  -> Broker still shows the opposite position for "
+                        f"{trade_sym} after close — skipping open leg"
+                    )
+                    break
             trade = self.gw.place_order(
-                contract, "SELL", leg_qty, price, position_intent=intent,
+                contract, leg.action, leg.qty, price, position_intent=leg.intent,
             )
             if trade is None:
-                return False
-            next_net = running_net - leg_qty
-            intent_label = "close" if intent == "close" else "short"
+                logger.warning(
+                    f"  -> {leg.action} {_fmt_qty(leg.qty)}x {trade_sym} failed — "
+                    f"dropping the rest of this slice; next interval re-plans "
+                    f"from the broker position"
+                )
+                break
+            signed_qty = leg.qty if leg.action == "BUY" else -leg.qty
             logger.info(
-                f"  -> SELL {_fmt_qty(leg_qty)}x {trade_sym} @ {price:.2f}  "
-                f"notional=${leg_qty * price:,.2f}  ({intent_label})  [signal={sym}]  "
-                f"(net: {_fmt_signed_qty(running_net)} → {_fmt_signed_qty(next_net)})"
+                f"  -> {leg.action} {_fmt_qty(leg.qty)}x {trade_sym} @ {price:.2f}  "
+                f"notional=${leg.qty * price:,.2f}  ({_leg_label(leg)})  [signal={sym}]  "
+                f"(net: {_fmt_signed_qty(new_net)} → {_fmt_signed_qty(new_net + signed_qty)})"
             )
-            running_net = next_net
-        new_net = running_net
+            new_net += signed_qty
+            prev_intent = leg.intent
 
-        self._position_reserve[sym] = new_reserve
+        self._settle(sym, price, current, avg_entry, new_net)
 
+        if abs(new_reserve) > 1e-9:
+            logger.info(f"  -> (reserve: {_fmt_signed_qty(new_reserve)})")
+
+    def _fetch_price(self, trade_sym: str, contract: object) -> Optional[float]:
+        """Fetch the last price, retrying on dropped/stale connections."""
+        for attempt in range(3):
+            try:
+                return self.gw.get_last_price(contract)
+            except (ConnectionError, ProtocolError):
+                if attempt < 2:
+                    logger.warning(
+                        f"  -> Connection dropped fetching {trade_sym} price. "
+                        f"Retrying {attempt + 1}/3..."
+                    )
+                    time.sleep(2)
+                else:
+                    logger.error(
+                        f"  -> Failed to fetch price for {trade_sym} after 3 attempts."
+                    )
+        return None
+
+    def _settle(
+        self,
+        sym: str,
+        price: float,
+        prev_net: float,
+        avg_entry: Optional[float],
+        new_net: float,
+    ) -> None:
+        """Update PnL and cached state after this tick's fills.
+
+        ``prev_net`` is the broker position before the tick's orders and
+        ``new_net`` the position implied by the fills that succeeded.
+        """
+        goes_flat = abs(prev_net) > _DUST_QTY and abs(new_net) <= _DUST_QTY
         crosses_zero = (
-            prev_net > 1e-9
-            and new_net < -_DUST_QTY
+            (prev_net > _DUST_QTY and new_net < -_DUST_QTY)
+            or (prev_net < -_DUST_QTY and new_net > _DUST_QTY)
         )
-        goes_flat = prev_net > 1e-9 and abs(new_net) <= _DUST_QTY
 
         if goes_flat or crosses_zero:
-            self._record_pnl(sym, price, prev_net, close_qty=prev_net)
-            if crosses_zero:
-                self._net_qty[sym] = new_net
-                self._total_cost[sym] = new_net * price
-            else:
-                self._net_qty[sym] = 0.0
-                self._total_cost[sym] = 0.0
+            entry = avg_entry
+            if entry is None:
+                known = self._net_qty.get(sym, 0.0)
+                cost = self._total_cost.get(sym, 0.0)
+                entry = cost / known if abs(known) > _BROKER_EPS else price
+            pnl = (price - entry) * prev_net
+            direction = Signal.UP if prev_net > 0 else Signal.DOWN
+            self.perf.record_close(sym, pnl, direction)
+            logger.info(
+                f"  -> Closed {'LONG' if prev_net > 0 else 'SHORT'} "
+                f"{_fmt_qty(abs(prev_net))}x {sym}  est.PnL={pnl:+.2f}"
+            )
+            logger.info(f"  -> {self.perf.summary()}")
+
+        self._net_qty[sym] = new_net
+        if abs(new_net) <= _BROKER_EPS:
+            self._total_cost[sym] = 0.0
+        elif goes_flat or crosses_zero:
+            self._total_cost[sym] = new_net * price
         else:
-            self._net_qty[sym] = new_net
-            signed_delta = new_net - prev_net
-            self._total_cost[sym] = self._total_cost.get(sym, 0.0) + signed_delta * price
-
-        reserve_note = (
-            f"  (reserve: {_fmt_signed_qty(new_reserve)})"
-            if abs(new_reserve) > 1e-9
-            else ""
-        )
-        if reserve_note:
-            logger.info(f"  ->{reserve_note.lstrip()}")
-        return True
-
-    def _record_pnl(
-        self, sym: str, exit_price: float, prev_net: float, close_qty: float
-    ) -> None:
-        total_cost = self._total_cost.get(sym, 0.0)
-        if prev_net == 0:
-            return
-        avg_entry = total_cost / prev_net
-        pnl = (exit_price - avg_entry) * close_qty
-        direction = Signal.UP if prev_net > 0 else Signal.DOWN
-        self.perf.record_close(sym, pnl, direction)
-        logger.info(
-            f"  -> Closed {'LONG' if prev_net > 0 else 'SHORT'} "
-            f"{_fmt_qty(abs(close_qty))}x {sym}  est.PnL={pnl:+.2f}"
-        )
-        logger.info(f"  -> {self.perf.summary()}")
+            entry = avg_entry if avg_entry is not None else price
+            self._total_cost[sym] = prev_net * entry + (new_net - prev_net) * price
 
 
 # ------------------------------------------------------------------
-# Helpers
+# Reconciliation core
+# ------------------------------------------------------------------
+
+def _snap_target(ideal: float, use_fractional: bool) -> tuple[float, float]:
+    """Snap the ideal (continuous) position to what the broker can hold.
+
+    Returns ``(target, reserve)`` with ``ideal == target + reserve``.
+    Fractional longs are held exactly on Alpaca; shorts snap to the nearest
+    whole share (fractional shorts are rejected, code 42210000).  Integer
+    brokers round everything and carry no reserve.
+    """
+    if use_fractional:
+        if ideal >= -_BROKER_EPS:
+            return max(0.0, ideal), 0.0
+        target = float(round(ideal))
+        return target, ideal - target
+    return float(round(ideal)), 0.0
+
+
+def _plan_legs(
+    current: float,
+    target: float,
+    avail_close: float,
+    use_fractional: bool,
+) -> list[_Leg]:
+    """Orders that move a broker position from *current* to *target*.
+
+    Pure function of the broker state; returns at most two legs — close the
+    opposite side, then open — because Alpaca requires separate
+    close/open orders when a position crosses through flat.
+
+    - Close legs are capped to ``avail_close`` (shares not tied up in other
+      orders) and floored so they never exceed broker holdings; sub-lot dust
+      is still closed via a 9-d.p. fallback.
+    - An open leg is emitted only when the opposite side is fully cleared
+      (within ``_DUST_QTY``); otherwise the close leg makes partial progress
+      and the next tick re-plans.
+    - Short opens are whole shares (targets are pre-snapped by
+      ``_snap_target``).
+    """
+    delta = target - current
+    if abs(delta) <= _BROKER_EPS:
+        return []
+
+    legs: list[_Leg] = []
+    if delta < 0:  # selling
+        sell_total = -delta
+        cur_long = max(current, 0.0)
+        closeable = min(cur_long, avail_close)
+        close_qty = _floor_leg(min(sell_total, closeable), use_fractional)
+        if close_qty > _BROKER_EPS:
+            legs.append(_Leg("SELL", close_qty, "close"))
+        if target < -_DUST_QTY:
+            if cur_long - close_qty > _DUST_QTY:
+                return legs  # long not cleared — no short open this tick
+            open_qty = -target - max(-current, 0.0)
+            if use_fractional:
+                open_qty = float(round(open_qty))  # whole-share shorts only
+            if open_qty > _BROKER_EPS:
+                legs.append(_Leg("SELL", open_qty, "open"))
+    else:  # buying
+        buy_total = delta
+        cur_short = max(-current, 0.0)
+        closeable = min(cur_short, avail_close)
+        close_qty = _floor_leg(min(buy_total, closeable), use_fractional)
+        if close_qty > _BROKER_EPS:
+            legs.append(_Leg("BUY", close_qty, "close"))
+        if target > _DUST_QTY:
+            if cur_short - close_qty > _DUST_QTY:
+                return legs  # short not cleared — no long open this tick
+            open_qty = target - max(current, 0.0)
+            if not use_fractional:
+                open_qty = float(round(open_qty))
+            if open_qty > _DUST_QTY:
+                legs.append(_Leg("BUY", open_qty, "open"))
+    return legs
+
+
+def _floor_leg(qty: float, use_fractional: bool) -> float:
+    """Floor a close-leg size so it never exceeds broker holdings.
+
+    Fractional brokers floor at 4 d.p.; sub-0.0001 dust (e.g. 9.9994e-05)
+    would floor to 0, so fall back to 9 d.p. to still close it.
+    """
+    if qty <= _BROKER_EPS:
+        return 0.0
+    if not use_fractional:
+        return float(math.floor(qty + 1e-12))
+    floored = _floor_qty(qty, 4)
+    if floored <= _BROKER_EPS:
+        return _floor_qty(qty, 9)
+    return floored
+
+
+# ------------------------------------------------------------------
+# Broker state helpers
+# ------------------------------------------------------------------
+
+def _broker_position(gw: GatewayBase, etf_symbol: str) -> dict | None:
+    """Return the broker position dict for *etf_symbol*, or None if flat."""
+    for attempt in range(3):
+        try:
+            for p in gw.get_positions_for_sync():
+                if p["symbol"] == etf_symbol:
+                    return p
+            return None
+        except (ReadTimeout, ConnectionError, ProtocolError):
+            if attempt < 2:
+                logger.warning(
+                    f"Network error fetching broker positions for {etf_symbol}. "
+                    f"Retrying {attempt + 1}/3..."
+                )
+                time.sleep(2)
+            else:
+                logger.error(
+                    f"Failed to fetch positions for {etf_symbol} after 3 attempts."
+                )
+                raise
+
+
+def _broker_state(gw: GatewayBase, etf_symbol: str) -> tuple[float, float, Optional[float]]:
+    """Return ``(signed_qty, qty_available, avg_entry_price)`` from the broker.
+
+    ``qty_available`` is unsigned and capped by what the broker reports as
+    free to close (shares not tied up in other open orders).
+    """
+    pos = _broker_position(gw, etf_symbol)
+    if pos is None:
+        return 0.0, 0.0, None
+    qty = float(pos["qty"])
+    side = normalize_position_side(pos.get("side"), qty=qty)
+    signed = -abs(qty) if side == "short" else abs(qty)
+    avail = abs(float(pos.get("qty_available") or 0.0)) or abs(qty)
+    avg_raw = pos.get("avg_price")
+    avg = float(avg_raw) if avg_raw else None
+    return signed, avail, avg
+
+
+def _wait_opposite_cleared(
+    gw: GatewayBase,
+    etf_symbol: str,
+    open_action: str,
+    timeout: float = 3.0,
+    poll: float = 1.0,
+) -> bool:
+    """Poll until the side blocking *open_action* is gone (post-close settle lag).
+
+    A BUY open needs the short cleared; a SELL open needs the long cleared.
+    Uses exponential backoff to reduce API calls while catching quick settles.
+    """
+
+    def _cleared() -> bool:
+        current, _, _ = _broker_state(gw, etf_symbol)
+        if open_action == "BUY":
+            return current >= -_BROKER_EPS
+        return current <= _BROKER_EPS
+
+    if _cleared():
+        return True
+    deadline = time.perf_counter() + timeout
+    wait = poll
+    while time.perf_counter() < deadline:
+        time.sleep(wait)
+        if _cleared():
+            return True
+        wait = min(wait * 1.5, 2.0)
+    return False
+
+
+# ------------------------------------------------------------------
+# Formatting / misc helpers
 # ------------------------------------------------------------------
 
 def _signal_ts_epoch(signal_time_utc: object) -> float:
@@ -532,64 +641,10 @@ def _floor_qty(qty: float, decimals: int = 4) -> float:
     return math.floor(qty * factor + 1e-12) / factor
 
 
-def _broker_long_qty(gw: GatewayBase, etf_symbol: str) -> float:
-    """Shares available to sell (long qty only; shorts return 0)."""
-    for attempt in range(3):
-        try:
-            for p in gw.get_positions_for_sync():
-                if p["symbol"] == etf_symbol:
-                    return max(0.0, float(p["qty"]))
-            return 0.0
-        except (ReadTimeout, ConnectionError, ProtocolError) as e:
-            if attempt < 2:
-                logger.warning(f"Network error fetching broker positions for {etf_symbol}. Retrying {attempt + 1}/3...")
-                time.sleep(2)
-            else:
-                logger.error(f"Failed to fetch positions for {etf_symbol} after 3 attempts. Aborting.")
-                raise e
-
-def _close_long_qty(
-    prev_net: float,
-    broker_long: float,
-    use_fractional: bool,
-) -> float:
-    """Shares to sell with sell_to_close before opening a short."""
-    if prev_net > 1e-9:
-        raw = min(prev_net, broker_long) if broker_long > 1e-9 else prev_net
-    elif broker_long > 1e-9:
-        raw = broker_long
-    else:
-        return 0.0
-
-    if use_fractional:
-        floored = _floor_qty(raw, 4)
-        if floored <= 1e-9 and broker_long > 1e-9:
-            return _floor_qty(broker_long, 4)
-        return floored
-    return float(math.floor(raw + 1e-12))
-
-
-def _cap_sell_qty(
-    gw: GatewayBase,
-    etf_symbol: str,
-    trade_qty: float,
-    use_fractional: bool,
-) -> float:
-    """Cap sell size to broker long holdings and floor to avoid overshoot."""
-    available = _broker_long_qty(gw, etf_symbol)
-    if available <= 1e-9:
-        return trade_qty
-    capped = min(trade_qty, available)
-    if use_fractional:
-        floored = _floor_qty(capped, 4)
-    else:
-        floored = float(math.floor(capped + 1e-12))
-    if floored <= 1e-9:
-        # Broker holds sub-lot dust that floors to zero — sell the dust itself.
-        if available > 1e-9:
-            return _floor_qty(available, 4) if use_fractional else available
-        return trade_qty
-    return floored
+def _leg_label(leg: _Leg) -> str:
+    if leg.intent == "close":
+        return "cover" if leg.action == "BUY" else "close"
+    return "long" if leg.action == "BUY" else "short"
 
 
 def _fmt_qty(qty: float) -> str:
