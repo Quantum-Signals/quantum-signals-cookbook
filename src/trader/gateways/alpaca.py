@@ -7,7 +7,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from trader.config import Settings
-from trader.gateways.base import GatewayBase
+from trader.gateways.base import GatewayBase, normalize_position_side
 
 # Alpaca's RESTClient uses ``requests.Session`` without per-call timeouts, so a
 # stalled TCP connection can block the main trading loop forever (e.g. during
@@ -151,6 +151,10 @@ class AlpacaGateway(GatewayBase):
             alpaca_intent = PositionIntent.SELL_TO_OPEN
         elif position_intent == "close" and side == OrderSide.SELL:
             alpaca_intent = PositionIntent.SELL_TO_CLOSE
+        elif position_intent == "open" and side == OrderSide.BUY:
+            alpaca_intent = PositionIntent.BUY_TO_OPEN
+        elif position_intent == "close" and side == OrderSide.BUY:
+            alpaca_intent = PositionIntent.BUY_TO_CLOSE
 
         if self._settings.use_market_orders or price is None:
             req = MarketOrderRequest(
@@ -177,19 +181,69 @@ class AlpacaGateway(GatewayBase):
             order = self._trading_client.submit_order(req)
         except Exception as exc:
             msg = str(exc)
-            logger.error(f"[Alpaca] Order submission failed for {ticker}: {exc}")
-            # Code 42210000 means the resulting position would be a fractional
-            # short. Almost always indicates the strategy's net_qty has drifted
-            # from the broker's actual position — the next sync_positions()
-            # call (start of next trading day) will reconcile.
-            if "42210000" in msg or "fractional orders cannot be sold short" in msg:
+            retry_intent = _intent_mismatch_retry_intent(msg, side)
+            if retry_intent is not None and retry_intent != alpaca_intent:
+                from alpaca.trading.enums import PositionIntent
+
+                retry_qty = qty
+                if retry_intent in (
+                    PositionIntent.BUY_TO_CLOSE,
+                    PositionIntent.SELL_TO_CLOSE,
+                ):
+                    cap = self._closeable_qty(ticker, retry_intent)
+                    logger.info(
+                        f"[Alpaca] Intent mismatch retry: closeable={cap} "
+                        f"requested={retry_qty} intent={retry_intent}"
+                    )
+                    if cap <= 1e-12:
+                        logger.warning(
+                            f"[Alpaca] Intent mismatch for {ticker} but nothing "
+                            f"to close — not retrying {action.upper()} {qty}x"
+                        )
+                        _log_alpaca_order_hint(msg, ticker)
+                        return None
+                    if retry_qty > cap + 1e-9:
+                        logger.warning(
+                            f"[Alpaca] Capping retry {action.upper()} "
+                            f"{retry_qty}x → {cap}x {ticker} (closeable at broker)"
+                        )
+                        retry_qty = cap
                 logger.warning(
-                    f"[Alpaca] Hint: this typically means strategy state for "
-                    f"{ticker} is out of sync with the broker. The bot will "
-                    f"re-sync at the next session start; manually flatten any "
-                    f"stray positions in the Alpaca dashboard if needed."
+                    f"[Alpaca] Retrying {action.upper()} {retry_qty}x {ticker} with "
+                    f"position_intent={retry_intent.value} "
+                    f"(was {alpaca_intent.value if alpaca_intent else 'unset'})"
                 )
-            return None
+                if isinstance(req, MarketOrderRequest):
+                    req = MarketOrderRequest(
+                        symbol=ticker,
+                        qty=retry_qty,
+                        side=side,
+                        time_in_force=TimeInForce.DAY,
+                        position_intent=retry_intent,
+                    )
+                else:
+                    req = LimitOrderRequest(
+                        symbol=ticker,
+                        qty=retry_qty,
+                        side=side,
+                        time_in_force=TimeInForce.DAY,
+                        limit_price=price,
+                        position_intent=retry_intent,
+                    )
+                try:
+                    order = self._trading_client.submit_order(req)
+                    qty = retry_qty
+                except Exception as retry_exc:
+                    msg = str(retry_exc)
+                    logger.error(
+                        f"[Alpaca] Order submission failed for {ticker}: {retry_exc}"
+                    )
+                    _log_alpaca_order_hint(msg, ticker)
+                    return None
+            else:
+                logger.error(f"[Alpaca] Order submission failed for {ticker}: {exc}")
+                _log_alpaca_order_hint(msg, ticker)
+                return None
 
         logger.debug(
             f"[Alpaca] Order submitted  id={order.id}  status={order.status}"
@@ -267,14 +321,77 @@ class AlpacaGateway(GatewayBase):
         positions = self._trading_client.get_all_positions()
         result = []
         for p in positions:
-            qty = float(p.qty)
+            raw_qty = float(p.qty)
+            side = normalize_position_side(getattr(p, "side", None), qty=raw_qty)
+            if side == "short":
+                qty = -abs(raw_qty)
+            else:
+                qty = abs(raw_qty)
             if qty == 0:
                 continue
+            qty_available = float(getattr(p, "qty_available", None) or abs(raw_qty))
             result.append(
                 {
                     "symbol": p.symbol,
                     "qty": qty,
+                    "qty_available": abs(qty_available),
+                    "side": side,
                     "avg_price": float(p.avg_entry_price),
                 }
             )
         return result
+
+    def _closeable_qty(self, ticker: str, intent: object) -> float:
+        """Shares available to close for *intent* (buy_to_close / sell_to_close)."""
+        from alpaca.trading.enums import PositionIntent
+
+        for p in self._trading_client.get_all_positions():
+            if p.symbol != ticker:
+                continue
+            raw_qty = float(p.qty)
+            side = normalize_position_side(getattr(p, "side", None), qty=raw_qty)
+            qty_avail = float(getattr(p, "qty_available", None) or abs(raw_qty))
+            logger.debug(
+                f"[Alpaca] _closeable_qty: {ticker} side={side} "
+                f"qty={raw_qty} qty_avail={qty_avail} intent={intent}"
+            )
+            if intent == PositionIntent.BUY_TO_CLOSE and side == "short":
+                return qty_avail
+            if intent == PositionIntent.SELL_TO_CLOSE and side == "long":
+                return qty_avail
+        return 0.0
+
+
+def _intent_mismatch_retry_intent(msg: str, side: object) -> object | None:
+    """Return the Alpaca PositionIntent Alpaca inferred, for one retry."""
+    from alpaca.trading.enums import OrderSide, PositionIntent
+
+    if "42210000" not in msg or "position intent mismatch" not in msg:
+        return None
+    inferred = None
+    for token in (
+        "buy_to_close",
+        "buy_to_open",
+        "sell_to_close",
+        "sell_to_open",
+    ):
+        if f"inferred: {token}" in msg:
+            inferred = token
+            break
+    if inferred is None:
+        return None
+    mapping = {
+        (OrderSide.BUY, "buy_to_close"): PositionIntent.BUY_TO_CLOSE,
+        (OrderSide.BUY, "buy_to_open"): PositionIntent.BUY_TO_OPEN,
+        (OrderSide.SELL, "sell_to_close"): PositionIntent.SELL_TO_CLOSE,
+        (OrderSide.SELL, "sell_to_open"): PositionIntent.SELL_TO_OPEN,
+    }
+    return mapping.get((side, inferred))
+
+
+def _log_alpaca_order_hint(msg: str, ticker: str) -> None:
+    if "42210000" in msg or "fractional orders cannot be sold short" in msg:
+        logger.warning(
+            f"[Alpaca] Hint: strategy state for {ticker} may be out of sync "
+            f"with the broker. The bot will re-sync at the next session start."
+        )
