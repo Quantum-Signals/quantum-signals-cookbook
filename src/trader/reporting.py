@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import threading
-import time
-
 from loguru import logger
 
 from trader.gateways.base import GatewayBase
@@ -39,20 +36,3 @@ def report_once(gw: GatewayBase, perf: PerformanceTracker) -> None:
         logger.info("=" * 60)
     except Exception as exc:
         logger.warning(f"Reporting error: {exc}")
-
-
-def reporting_loop(
-    gw: GatewayBase,
-    perf: PerformanceTracker,
-    stop_event: threading.Event,
-) -> None:
-    """Log account summary and bot performance every 60 seconds (background thread).
-
-    Prefer calling :func:`report_once` from the main thread when using ib_async
-    with the same thread as ``connect()``.
-    """
-    while not stop_event.is_set():
-        time.sleep(60)
-        if stop_event.is_set():
-            break
-        report_once(gw, perf)

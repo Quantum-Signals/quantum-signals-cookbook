@@ -68,23 +68,51 @@ class SimulatedGateway(GatewayBase):
         self,
         contract: SimContract,
         action: str,
-        qty: int,
+        qty: int | float,
         price: Optional[float] = None,
+        position_intent: Optional[str] = None,
     ) -> Optional[dict]:
         order_id = len(self._orders) + 1
         fill_price = price or self.get_last_price(contract) or 0.0
+        symbol = contract.symbol
+
+        cur_pos = float(self._sim_positions.get(symbol, {"pos": 0}).get("pos", 0))
+
+        if action.upper() == "SELL" and position_intent == "close":
+            long_avail = _sim_long_available(self._sim_positions.get(symbol, {"pos": 0}))
+            if float(qty) > long_avail + 1e-9:
+                logger.error(
+                    f"[SIM] REJECTED {symbol}: insufficient long qty "
+                    f"(requested: {qty}, available: {long_avail})"
+                )
+                return None
+
+        # Mimic Alpaca error 42210000: fractional orders cannot be sold short.
+        # A sell that leaves a *short* position must land on a whole share; a
+        # fractional resulting short is rejected outright by the broker.
+        if action.upper() == "SELL":
+            resulting_pos = cur_pos - float(qty)
+            if resulting_pos < -1e-9 and abs(resulting_pos - round(resulting_pos)) > 1e-6:
+                logger.error(
+                    f"[SIM] REJECTED {symbol}: "
+                    '{"code":42210000,"message":"fractional orders cannot be sold short"} '
+                    f"(cur={cur_pos}, qty={qty}, resulting={resulting_pos})"
+                )
+                return None
+
         order = {
             "id": order_id,
-            "symbol": contract.symbol,
+            "symbol": symbol,
             "action": action,
             "qty": qty,
             "price": fill_price,
             "status": "FILLED",
             "time": datetime.now(timezone.utc).isoformat(),
+            "position_intent": position_intent,
         }
         self._orders.append(order)
 
-        cur = self._sim_positions.get(contract.symbol, {"pos": 0, "avg_cost": 0})
+        cur = self._sim_positions.get(symbol, {"pos": 0, "avg_cost": 0})
         if action == "BUY":
             cur["pos"] += qty
         elif action == "SELL":
@@ -92,12 +120,12 @@ class SimulatedGateway(GatewayBase):
         cur["avg_cost"] = fill_price
 
         if cur["pos"] == 0:
-            self._sim_positions.pop(contract.symbol, None)
+            self._sim_positions.pop(symbol, None)
         else:
-            self._sim_positions[contract.symbol] = cur
+            self._sim_positions[symbol] = cur
 
         logger.info(
-            f"[SIM] Order #{order_id} FILLED  {action} {qty}x {contract.symbol} @ {fill_price:.2f}"
+            f"[SIM] Order #{order_id} FILLED  {action} {qty}x {symbol} @ {fill_price:.2f}"
         )
         return order
 
@@ -112,7 +140,18 @@ class SimulatedGateway(GatewayBase):
 
     def get_positions_for_sync(self) -> list[dict]:
         return [
-            {"symbol": sym, "qty": d["pos"], "avg_price": d["avg_cost"]}
+            {
+                "symbol": sym,
+                "qty": d["pos"],
+                "qty_available": abs(d["pos"]),
+                "side": "long" if d["pos"] > 0 else "short",
+                "avg_price": d["avg_cost"],
+            }
             for sym, d in self._sim_positions.items()
             if d["pos"] != 0
         ]
+
+
+def _sim_long_available(pos: dict) -> float:
+    qty = float(pos.get("pos", 0))
+    return max(0.0, qty)

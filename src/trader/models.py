@@ -3,23 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum
-from typing import Optional
 
 
 class Signal(IntEnum):
     DOWN = 0
     STABLE = 1
     UP = 2
-
-
-@dataclass
-class Position:
-    symbol: str
-    direction: Signal
-    qty: int
-    entry_price: float
-    entry_time: datetime
-    trade_ref: Optional[object] = None
 
 
 @dataclass
