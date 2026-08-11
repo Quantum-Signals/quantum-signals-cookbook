@@ -11,7 +11,7 @@ from requests.exceptions import ReadTimeout, ConnectionError
 from urllib3.exceptions import ProtocolError
 from trader.config import Settings
 from trader.gateways.base import GatewayBase, normalize_position_side
-from trader.models import PerformanceTracker, Signal
+from trader.models import PerformanceTracker, Signal, sig_label
 from trader.strategy.base import StrategyBase
 
 _TRADING_MINUTES_PER_DAY = 390  # 6.5 hours for US equities
@@ -254,7 +254,7 @@ class MomentumStrategy(StrategyBase):
             return
 
         self.perf.signal_counts[sig] += 1
-        logger.info(f"Signal  {sym}  {_sig_label(sig)}  model={signal.model}  ts={ts}")
+        logger.info(f"Signal  {sym}  {sig_label(sig)}  model={signal.model}  ts={ts}")
 
         # Gate on the signal's own timestamp rather than wall-clock time.
         # S&P500 and Nasdaq100 signals for the same QS bar share an identical
@@ -660,11 +660,3 @@ def _fmt_signed_qty(qty: float) -> str:
     return f"{sign}{_fmt_qty(qty)}"
 
 
-def _sig_label(sig: int | None) -> str:
-    if sig is None:
-        return "NONE --"
-    return {
-        Signal.UP: "UP ^",
-        Signal.STABLE: "STABLE ->",
-        Signal.DOWN: "DOWN v",
-    }.get(sig, f"?({sig})")
