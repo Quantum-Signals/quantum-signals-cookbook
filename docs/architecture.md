@@ -183,13 +183,21 @@ live-trader/
 
 ### Brokers (`src/trader/brokers/`)
 
-Factory in [`__init__.py`](src/trader/brokers/__init__.py):
+`create_broker(settings)` in [`__init__.py`](src/trader/brokers/__init__.py)
+selects a broker:
 
 ```
-DRY_RUN=true       → SimulatedBroker
+DRY_RUN=true       → simulated broker (SimulatedBroker)
 BROKER=alpaca      → AlpacaBroker   (REST, ETFs, fractional longs)
 BROKER=ibkr        → IBBroker       (ib_async, futures + stocks)
 ```
+
+Brokers are **discovered via entry points**, not a hardcoded list. Each broker
+registers under the `qs_trader_brokers` group (see `[project.entry-points]`
+in `pyproject.toml`); `create_broker` builds the name→class registry at runtime
+with `importlib.metadata.entry_points`. Installing a package that registers a
+broker under this group makes it selectable via `BROKER=<name>` with no core
+change. An unknown `BROKER` raises a `ValueError` listing the installed brokers.
 
 | Class | Notes |
 |-------|-------|
@@ -474,13 +482,20 @@ Full operator reference (env vars, strategies, symbols, paper vs live): [README.
 
 Three layers: `DRY_RUN` (simulated) → `BROKER` (Alpaca vs IBKR) → paper/live switch (`ALPACA_PAPER` or `IB_PORT`). See [README.md § Paper Trading vs Live Trading](README.md#paper-trading-vs-live-trading).
 
-### Code-only settings (`config.py`)
+### Symbol maps & code-only settings
 
-| Setting | Location | Purpose |
-|---------|----------|---------|
-| `symbol_map` | `_DEFAULT_SYMBOL_MAP` | IB contract specs; **roll `lastTradeDateOrContractMonth`** |
-| `contract_multipliers` | `_DEFAULT_CONTRACT_MULTIPLIERS` | EOD flatten PnL for futures |
-| `sim_prices` | `_DEFAULT_SIM_PRICES` | Dry-run price seeds |
+Each broker **owns its own symbol map** as a class attribute, so a reader opens
+one broker file to see how it maps QS symbols:
+
+| Map | Location | Purpose |
+|-----|----------|---------|
+| `AlpacaBroker.DEFAULT_SYMBOL_MAP` | `brokers/alpaca.py` | QS symbol → tradable ETF/stock ticker |
+| `IBBroker.DEFAULT_SYMBOL_MAP` | `brokers/ibkr.py` | QS symbol → IB contract spec; **roll `lastTradeDateOrContractMonth`** |
+| `SimulatedBroker.DEFAULT_SYMBOL_MAP` / `.DEFAULT_PRICES` | `brokers/simulated.py` | Dry-run contract shapes & price seeds |
+| `contract_multipliers` | `config.py` (`_DEFAULT_CONTRACT_MULTIPLIERS`) | EOD flatten PnL for futures (broker-neutral) |
+
+`Settings.symbol_map` / `Settings.sim_prices` stay as **optional overrides**
+(empty = use the broker's own default).
 
 ### Adding a strategy
 
@@ -488,6 +503,15 @@ Three layers: `DRY_RUN` (simulated) → `BROKER` (Alpaca vs IBKR) → paper/live
 2. Implement `handle_signal`; override `tick`, `sync_positions`, `reset_for_new_day` as needed
 3. Register in `app._STRATEGIES` dict
 4. Add tests with `FakeSignal` pattern from `tests/test_strategy.py`
+
+### Adding a broker
+
+1. Subclass `BrokerBase` (implement the abstract methods; own a `DEFAULT_SYMBOL_MAP`)
+2. Register it under the `qs_trader_brokers` entry-point group. In-tree, add a
+   line to `[project.entry-points.qs_trader_brokers]` in `pyproject.toml`;
+   an external package declares the same group in its own `pyproject.toml`.
+3. Reinstall (`uv sync`) so the entry-point metadata is written, then select it
+   with `BROKER=<name>`. No change to `create_broker` is needed.
 
 ### Settings not loaded from environment
 

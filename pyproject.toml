@@ -15,6 +15,14 @@ dependencies = [
 [project.scripts]
 live-trader = "trader.app:main"
 
+# Built-in brokers, discovered at runtime by trader.brokers.create_broker via
+# the "qs_trader_brokers" entry-point group. A third-party package can add
+# its own broker under this same group (see trader/brokers/__init__.py).
+[project.entry-points.qs_trader_brokers]
+simulated = "trader.brokers.simulated:SimulatedBroker"
+alpaca = "trader.brokers.alpaca:AlpacaBroker"
+ibkr = "trader.brokers.ibkr:IBBroker"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
