@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time as dt_time, timezone
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -252,7 +251,7 @@ class SignalFollowerStrategy(StrategyBase):
         signed = 1 if action == "BUY" else -1
         self._net_qty[sym] = self._net_qty.get(sym, 0) + signed
 
-        fill_price = _extract_fill_price(trade)
+        fill_price = trade.price
         if fill_price is None:
             fill_price = self.gw.get_last_price(contract)
         if fill_price is None:
@@ -294,7 +293,7 @@ class SignalFollowerStrategy(StrategyBase):
         self._total_cost[sym] = 0.0
         self._active_decision.pop(sym, None)
 
-        fill_price = _extract_fill_price(trade)
+        fill_price = trade.price
         if fill_price is None:
             fill_price = self.gw.get_last_price(contract)
         if fill_price is None:
@@ -322,33 +321,6 @@ class SignalFollowerStrategy(StrategyBase):
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-
-def _extract_fill_price(trade_ref: object) -> Optional[float]:
-    """Get the actual execution price from a trade/order result.
-
-    Works with both ib_async Trade objects (orderStatus.avgFillPrice)
-    and SimulatedGateway dicts ({"price": ...}).
-    """
-    if isinstance(trade_ref, dict):
-        p = trade_ref.get("price")
-        if p is not None and p > 0:
-            return float(p)
-        return None
-
-    status = getattr(trade_ref, "orderStatus", None)
-    if status is not None:
-        avg = getattr(status, "avgFillPrice", 0.0)
-        if avg and avg > 0:
-            return float(avg)
-
-    fills = getattr(trade_ref, "fills", None)
-    if fills:
-        prices = [f.execution.avgPrice for f in fills if getattr(f, "execution", None)]
-        if prices:
-            return sum(prices) / len(prices)
-
-    return None
-
 
 def _to_eastern(for_minute_utc: object) -> datetime:
     """Convert the signal's UTC timestamp to Eastern Time."""

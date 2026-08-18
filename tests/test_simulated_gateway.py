@@ -49,9 +49,9 @@ class TestSimulatedGateway:
         order = gw.place_order(contract, "BUY", 1, 5450.0)
 
         assert order is not None
-        assert order["action"] == "BUY"
-        assert order["qty"] == 1
-        assert order["status"] == "FILLED"
+        assert order.action == "BUY"
+        assert order.qty == 1
+        assert order.status == "FILLED"
 
         positions = gw.get_open_positions()
         assert len(positions) == 1

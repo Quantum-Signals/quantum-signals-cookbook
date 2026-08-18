@@ -8,7 +8,7 @@ from typing import Optional
 from loguru import logger
 
 from trader.config import Settings
-from trader.gateways.base import GatewayBase
+from trader.gateways.base import GatewayBase, OrderResult
 
 
 class IBGateway(GatewayBase):
@@ -177,7 +177,7 @@ class IBGateway(GatewayBase):
         qty: int,
         price: Optional[float] = None,
         position_intent: Optional[str] = None,
-    ) -> Optional[object]:
+    ) -> Optional[OrderResult]:
         from ib_async import LimitOrder, MarketOrder
 
         if self._settings.use_market_orders or price is None:
@@ -200,7 +200,15 @@ class IBGateway(GatewayBase):
             if trade.orderStatus.status in _DONE or trade.fills:
                 break
 
-        return trade
+        return OrderResult(
+            id=str(getattr(order, "orderId", "") or getattr(order, "permId", "")),
+            symbol=str(getattr(contract, "localSymbol", None) or contract.symbol),
+            action=action.upper(),
+            qty=qty,
+            price=_ib_fill_price(trade),
+            status=str(trade.orderStatus.status),
+            raw=trade,
+        )
 
     def get_account_summary(self) -> dict:
         summary = {s.tag: s.value for s in self.ib.accountSummary()}
@@ -236,3 +244,24 @@ class IBGateway(GatewayBase):
             avg_price = p.averageCost / mult if mult else p.averageCost
             result.append({"symbol": sym, "qty": qty, "avg_price": avg_price})
         return result
+
+
+def _ib_fill_price(trade: object) -> Optional[float]:
+    """Actual execution price from an ib_async Trade, or None if not filled.
+
+    Prefers ``orderStatus.avgFillPrice``; falls back to averaging the per-fill
+    execution prices.
+    """
+    status = getattr(trade, "orderStatus", None)
+    if status is not None:
+        avg = getattr(status, "avgFillPrice", 0.0)
+        if avg and avg > 0:
+            return float(avg)
+
+    fills = getattr(trade, "fills", None)
+    if fills:
+        prices = [f.execution.avgPrice for f in fills if getattr(f, "execution", None)]
+        if prices:
+            return sum(prices) / len(prices)
+
+    return None

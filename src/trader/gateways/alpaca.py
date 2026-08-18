@@ -7,7 +7,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from trader.config import Settings
-from trader.gateways.base import GatewayBase, normalize_position_side
+from trader.gateways.base import GatewayBase, OrderResult, normalize_position_side
 
 # Alpaca's RESTClient uses ``requests.Session`` without per-call timeouts, so a
 # stalled TCP connection can block the main trading loop forever (e.g. during
@@ -37,8 +37,8 @@ class AlpacaGateway(GatewayBase):
 
     The ``contract`` object used throughout this gateway is a plain ticker
     string (e.g. ``"SPY"``), which is sufficient for all Alpaca REST calls.
-    This is compatible with the dict-branch of ``_extract_fill_price()`` in
-    the strategy layer, which reads ``trade_result["price"]``.
+    ``place_order`` returns a broker-agnostic ``OrderResult`` with the fill
+    price already resolved.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -139,7 +139,7 @@ class AlpacaGateway(GatewayBase):
         qty: int | float,
         price: Optional[float] = None,
         position_intent: Optional[str] = None,
-    ) -> Optional[dict]:
+    ) -> Optional[OrderResult]:
         from alpaca.trading.enums import OrderSide, PositionIntent, TimeInForce
         from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
@@ -277,14 +277,15 @@ class AlpacaGateway(GatewayBase):
             f"fill_price={filled_avg_price}  id={order.id}"
         )
 
-        return {
-            "id": str(order.id),
-            "symbol": ticker,
-            "action": action.upper(),
-            "qty": qty,
-            "price": filled_avg_price,
-            "status": str(order.status),
-        }
+        return OrderResult(
+            id=str(order.id),
+            symbol=ticker,
+            action=action.upper(),
+            qty=qty,
+            price=filled_avg_price,
+            status=str(order.status),
+            raw=order,
+        )
 
     # ------------------------------------------------------------------
     # Account & positions

@@ -1,7 +1,28 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Optional
+
+
+@dataclass
+class OrderResult:
+    """Broker-agnostic result of a ``place_order`` call.
+
+    Every gateway returns this shape so callers never inspect broker-native
+    objects. ``price`` is the actual fill price when known (the gateway extracts
+    it from the underlying order/trade), or ``None`` if the order did not fill in
+    time. ``raw`` holds the native result (an ``ib_async.Trade``, an Alpaca order
+    dict, etc.) as an escape hatch for gateway-specific follow-up.
+    """
+
+    id: str
+    symbol: str
+    action: str
+    qty: float
+    price: Optional[float]
+    status: str
+    raw: object = None
 
 
 def normalize_position_side(side: object, *, qty: float = 0.0) -> str:
@@ -43,7 +64,7 @@ class GatewayBase(ABC):
         qty: int,
         price: Optional[float] = None,
         position_intent: Optional[str] = None,
-    ) -> Optional[object]: ...
+    ) -> Optional[OrderResult]: ...
 
     @abstractmethod
     def get_account_summary(self) -> dict: ...

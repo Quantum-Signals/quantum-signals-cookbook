@@ -8,7 +8,7 @@ from typing import Optional
 from loguru import logger
 
 from trader.config import Settings
-from trader.gateways.base import GatewayBase
+from trader.gateways.base import GatewayBase, OrderResult
 
 
 @dataclass
@@ -71,7 +71,7 @@ class SimulatedGateway(GatewayBase):
         qty: int | float,
         price: Optional[float] = None,
         position_intent: Optional[str] = None,
-    ) -> Optional[dict]:
+    ) -> Optional[OrderResult]:
         order_id = len(self._orders) + 1
         fill_price = price or self.get_last_price(contract) or 0.0
         symbol = contract.symbol
@@ -127,7 +127,15 @@ class SimulatedGateway(GatewayBase):
         logger.info(
             f"[SIM] Order #{order_id} FILLED  {action} {qty}x {symbol} @ {fill_price:.2f}"
         )
-        return order
+        return OrderResult(
+            id=str(order_id),
+            symbol=symbol,
+            action=action.upper(),
+            qty=qty,
+            price=fill_price,
+            status="FILLED",
+            raw=order,
+        )
 
     def get_account_summary(self) -> dict:
         return dict(self._sim_account)

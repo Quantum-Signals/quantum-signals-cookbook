@@ -16,7 +16,7 @@ from trader.models import PerformanceTracker
 from trader.reporting import report_once
 from trader.strategy.base import StrategyBase
 from trader.strategy.momentum import MomentumStrategy
-from trader.strategy.signal_follower import SignalFollowerStrategy, _extract_fill_price
+from trader.strategy.signal_follower import SignalFollowerStrategy
 from trader.streaming import stream_signals_thread
 
 _STRATEGIES = {
@@ -228,7 +228,7 @@ def _close_all_positions(
             action = "SELL" if qty > 0 else "BUY"
             trade = gw.place_order(contract, action, abs(qty))
 
-            fill_price = _extract_fill_price(trade) if trade else None
+            fill_price = trade.price if trade else None
             if fill_price is None:
                 fill_price = gw.get_last_price(contract)
 
