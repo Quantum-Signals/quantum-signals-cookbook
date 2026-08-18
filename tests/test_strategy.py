@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from trader.config import Settings
-from trader.brokers.simulated import SimulatedBroker
+from qs_trader_broker_core import SimulatedBroker
 from trader.models import PerformanceTracker, Signal
 from trader.strategy.momentum import MomentumStrategy
 
@@ -406,7 +406,7 @@ class TestMomentumStrategy:
         """Regression: PositionSide str() is 'PositionSide.SHORT', not 'short'."""
         from alpaca.trading.enums import PositionSide
 
-        from trader.brokers.base import normalize_position_side
+        from qs_trader_broker_core import normalize_position_side
 
         assert normalize_position_side(PositionSide.SHORT) == "short"
         assert normalize_position_side(PositionSide.LONG) == "long"

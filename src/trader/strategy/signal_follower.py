@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from trader.config import Settings
-from trader.brokers.base import BrokerBase
+from qs_trader_broker_core import BrokerBase
 from trader.models import PerformanceTracker, Signal, sig_label
 from trader.strategy.base import StrategyBase
 

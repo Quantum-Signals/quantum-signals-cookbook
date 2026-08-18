@@ -5,23 +5,19 @@ description = "QuantumSignals algorithmic trading bot (IBKR + Alpaca)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "alpaca-py>=0.29.0",
-    "ib-async>=2.0.0",
     "loguru>=0.7.3",
     "python-dotenv>=1.2.2",
     "quantumsignals-client>=0.6.0",
+    # Broker packages (workspace members). Each owns its own broker SDK
+    # (alpaca-py, ib-async) and registers a "qs_trader_brokers" entry point that
+    # trader.brokers.create_broker discovers at runtime.
+    "qs-trader-broker-core",
+    "qs-trader-broker-alpaca",
+    "qs-trader-broker-ibkr",
 ]
 
 [project.scripts]
 live-trader = "trader.app:main"
-
-# Built-in brokers, discovered at runtime by trader.brokers.create_broker via
-# the "qs_trader_brokers" entry-point group. A third-party package can add
-# its own broker under this same group (see trader/brokers/__init__.py).
-[project.entry-points.qs_trader_brokers]
-simulated = "trader.brokers.simulated:SimulatedBroker"
-alpaca = "trader.brokers.alpaca:AlpacaBroker"
-ibkr = "trader.brokers.ibkr:IBBroker"
 
 [build-system]
 requires = ["hatchling"]
@@ -29,6 +25,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trader"]
+
+[tool.uv.workspace]
+members = ["src/brokers/*"]
+
+[tool.uv.sources]
+qs-trader-broker-core = { workspace = true }
+qs-trader-broker-alpaca = { workspace = true }
+qs-trader-broker-ibkr = { workspace = true }
 
 [dependency-groups]
 dev = [

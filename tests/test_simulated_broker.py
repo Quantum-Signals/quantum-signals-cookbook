@@ -1,5 +1,5 @@
 from trader.config import Settings
-from trader.brokers.simulated import SimContract, SimulatedBroker
+from qs_trader_broker_core import SimContract, SimulatedBroker
 
 
 def _make_settings(**overrides) -> Settings:

@@ -6,8 +6,12 @@ from typing import Any, Optional
 
 from loguru import logger
 
-from trader.config import Settings
-from trader.brokers.base import BrokerBase, OrderResult, normalize_position_side
+from qs_trader_broker_core import (
+    BrokerBase,
+    BrokerSettings,
+    OrderResult,
+    normalize_position_side,
+)
 
 # Alpaca's RESTClient uses ``requests.Session`` without per-call timeouts, so a
 # stalled TCP connection can block the main trading loop forever (e.g. during
@@ -54,7 +58,7 @@ class AlpacaBroker(BrokerBase):
         "AAPL": "AAPL",
     }
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: BrokerSettings) -> None:
         self._settings = settings
         self._symbol_map = settings.symbol_map or self.DEFAULT_SYMBOL_MAP
         self._trading_client: object = None

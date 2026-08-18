@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from trader.config import Settings
-from trader.brokers.simulated import SimulatedBroker
+from qs_trader_broker_core import SimulatedBroker
 from trader.models import PerformanceTracker, Signal
 from trader.strategy.signal_follower import SignalFollowerStrategy
 

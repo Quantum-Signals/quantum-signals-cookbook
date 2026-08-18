@@ -10,7 +10,7 @@ from loguru import logger
 from requests.exceptions import ReadTimeout, ConnectionError
 from urllib3.exceptions import ProtocolError
 from trader.config import Settings
-from trader.brokers.base import BrokerBase, normalize_position_side
+from qs_trader_broker_core import BrokerBase, normalize_position_side
 from trader.models import PerformanceTracker, Signal, sig_label
 from trader.strategy.base import StrategyBase
 

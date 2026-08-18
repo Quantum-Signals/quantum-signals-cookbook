@@ -7,8 +7,7 @@ from typing import Optional
 
 from loguru import logger
 
-from trader.config import Settings
-from trader.brokers.base import BrokerBase, OrderResult
+from qs_trader_broker_core import BrokerBase, BrokerSettings, OrderResult
 
 
 class IBBroker(BrokerBase):
@@ -34,7 +33,7 @@ class IBBroker(BrokerBase):
         "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
     }
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: BrokerSettings) -> None:
         from ib_async import IB
 
         self._settings = settings

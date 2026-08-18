@@ -7,8 +7,8 @@ from typing import Optional
 
 from loguru import logger
 
-from trader.config import Settings
-from trader.brokers.base import BrokerBase, OrderResult
+from qs_trader_broker_core.base import BrokerBase, OrderResult
+from qs_trader_broker_core.settings import BrokerSettings
 
 
 @dataclass
@@ -50,7 +50,7 @@ class SimulatedBroker(BrokerBase):
         "CL": 68.50, "GC": 2350.00, "AAPL": 218.50, "SPY": 545.00, "QQQ": 470.00,
     }
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: BrokerSettings) -> None:
         self._settings = settings
         self._symbol_map = settings.symbol_map or self.DEFAULT_SYMBOL_MAP
         self._prices: dict[str, float] = dict(settings.sim_prices or self.DEFAULT_PRICES)

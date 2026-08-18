@@ -11,7 +11,7 @@ from loguru import logger
 from quantumsignals.client import Client as QSClient
 from trader.config import Settings, load_settings
 from trader.brokers import create_broker
-from trader.brokers.base import BrokerBase
+from qs_trader_broker_core import BrokerBase
 from trader.models import PerformanceTracker
 from trader.reporting import report_once
 from trader.strategy.base import StrategyBase

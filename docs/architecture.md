@@ -150,21 +150,25 @@ When `RUN_DAYS=0` (default), the process runs until Ctrl-C:
 ### Tree
 
 ```
-live-trader/
+live-trader/                # uv workspace root (the app)
 ├── main.py                 # → trader.app:main
 ├── documentation.md        # This file
 ├── README.md               # Operator quick start
-├── pyproject.toml          # deps; console script live-trader
+├── pyproject.toml          # app deps + [tool.uv.workspace]
 ├── .env.example
 ├── Dockerfile / docker-compose.yml
-├── src/trader/
+├── src/trader/             # the app package
 │   ├── app.py              # Orchestration, session supervisor, EOD
-│   ├── config.py           # Settings, symbol_map, multipliers
+│   ├── config.py           # Settings (satisfies BrokerSettings), multipliers
 │   ├── models.py           # Signal enum, PerformanceTracker
 │   ├── streaming.py        # QS SSE → queue
 │   ├── reporting.py        # report_once snapshots
-│   ├── brokers/            # Broker abstraction
+│   ├── brokers/            # create_broker discovery only (no concrete brokers)
 │   └── strategy/           # momentum, signal_follower
+├── src/brokers/            # broker packages (uv workspace members)
+│   ├── core/               # qs-trader-broker-core: BrokerBase, OrderResult, BrokerSettings, SimulatedBroker
+│   ├── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
+│   └── ibkr/               # qs-trader-broker-ibkr  (deps: ib-async)
 ├── tests/
 └── scripts/                # tutorial, QS test, multiday sim
 ```
@@ -177,27 +181,47 @@ live-trader/
 | Orchestration | `app.py` | `main`, `_run_trading_day`, `_close_all_positions`, `_sleep_until` |
 | Config | `config.py` | `Settings`, `load_settings` |
 | Ingestion | `streaming.py` | `stream_signals_thread` |
-| Execution | `brokers/*` | `create_broker`, `BrokerBase` implementations |
+| Execution | `trader/brokers/` (discovery) + `src/brokers/*` (packages) | `create_broker`, `BrokerBase` implementations |
 | Logic | `strategy/*` | `MomentumStrategy`, `SignalFollowerStrategy` |
 | Metrics | `models.py`, `reporting.py` | `PerformanceTracker`, `report_once` |
 
-### Brokers (`src/trader/brokers/`)
+### Brokers (separate workspace packages)
 
-`create_broker(settings)` in [`__init__.py`](src/trader/brokers/__init__.py)
-selects a broker:
+Brokers live in their own uv workspace packages under `src/brokers/`, each
+owning its broker SDK:
+
+| Package | Module | Provides | SDK dep |
+|---------|--------|----------|---------|
+| `qs-trader-broker-core` | `qs_trader_broker_core` | `BrokerBase`, `OrderResult`, `BrokerSettings`, `SimulatedBroker` | — |
+| `qs-trader-broker-alpaca` | `qs_trader_broker_alpaca` | `AlpacaBroker` | `alpaca-py` |
+| `qs-trader-broker-ibkr` | `qs_trader_broker_ibkr` | `IBBroker` | `ib-async` |
+
+`create_broker(settings)` in the app's
+[`brokers/__init__.py`](src/trader/brokers/__init__.py) selects a broker:
 
 ```
-DRY_RUN=true       → simulated broker (SimulatedBroker)
+DRY_RUN=true       → simulated broker (SimulatedBroker, in core)
 BROKER=alpaca      → AlpacaBroker   (REST, ETFs, fractional longs)
 BROKER=ibkr        → IBBroker       (ib_async, futures + stocks)
 ```
 
 Brokers are **discovered via entry points**, not a hardcoded list. Each broker
-registers under the `qs_trader_brokers` group (see `[project.entry-points]`
-in `pyproject.toml`); `create_broker` builds the name→class registry at runtime
-with `importlib.metadata.entry_points`. Installing a package that registers a
-broker under this group makes it selectable via `BROKER=<name>` with no core
-change. An unknown `BROKER` raises a `ValueError` listing the installed brokers.
+package registers under the `qs_trader_brokers` group in **its own**
+`pyproject.toml`; `create_broker` builds the name→class registry at runtime with
+`importlib.metadata.entry_points`. Installing a package that registers a broker
+under this group makes it selectable via `BROKER=<name>` with no core change. An
+unknown `BROKER` raises a `ValueError` listing the installed brokers.
+
+**Dependency graph (a DAG — no import cycle).** Broker packages depend on
+`qs-trader-broker-core`, never on the app. They type their `__init__` against
+`BrokerSettings` (a `Protocol` in core), which the app's `Settings` dataclass
+satisfies structurally — so a broker package imports nothing from `trader`.
+
+```
+trader (app) ──→ qs-trader-broker-core ←── qs-trader-broker-alpaca
+     │                                  ←── qs-trader-broker-ibkr
+     └──→ alpaca / ibkr packages (default install; drop one for a slimmer build)
+```
 
 | Class | Notes |
 |-------|-------|
@@ -506,12 +530,19 @@ one broker file to see how it maps QS symbols:
 
 ### Adding a broker
 
-1. Subclass `BrokerBase` (implement the abstract methods; own a `DEFAULT_SYMBOL_MAP`)
-2. Register it under the `qs_trader_brokers` entry-point group. In-tree, add a
-   line to `[project.entry-points.qs_trader_brokers]` in `pyproject.toml`;
-   an external package declares the same group in its own `pyproject.toml`.
-3. Reinstall (`uv sync`) so the entry-point metadata is written, then select it
-   with `BROKER=<name>`. No change to `create_broker` is needed.
+A broker is its own package (in-tree under `src/brokers/`, or external):
+
+1. Create a package that depends on `qs-trader-broker-core`. In-tree, add a
+   directory under `src/brokers/`; the workspace glob picks it up.
+2. Subclass `BrokerBase` (implement the abstract methods; own a
+   `DEFAULT_SYMBOL_MAP`). Type `__init__` against `BrokerSettings` from core —
+   do **not** import `trader`, which keeps the package graph a DAG.
+3. Register the broker under the `qs_trader_brokers` entry-point group in the
+   package's own `pyproject.toml`:
+   `[project.entry-points.qs_trader_brokers]` → `myname = "my_module:MyBroker"`.
+4. `uv sync` so the entry-point metadata is written, then select it with
+   `BROKER=myname`. No change to `create_broker` — an external `uv add
+   my-broker-package` works the same way.
 
 ### Settings not loaded from environment
 

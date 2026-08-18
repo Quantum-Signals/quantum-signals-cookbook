@@ -3,8 +3,9 @@ from __future__ import annotations
 from importlib.metadata import entry_points
 from typing import Callable
 
+from qs_trader_broker_core import BrokerBase
+
 from trader.config import Settings
-from trader.brokers.base import BrokerBase
 
 __all__ = ["BrokerBase", "discover_brokers", "create_broker"]
 
