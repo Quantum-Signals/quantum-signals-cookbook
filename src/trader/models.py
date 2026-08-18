@@ -11,6 +11,17 @@ class Signal(IntEnum):
     UP = 2
 
 
+def sig_label(sig: int | None) -> str:
+    """Human-readable label for a signal value."""
+    if sig is None:
+        return "NONE --"
+    return {
+        Signal.UP: "UP ^",
+        Signal.STABLE: "STABLE ->",
+        Signal.DOWN: "DOWN v",
+    }.get(sig, f"?({sig})")
+
+
 @dataclass
 class PerformanceTracker:
     total_trades: int = 0

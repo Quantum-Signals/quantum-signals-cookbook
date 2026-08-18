@@ -2,7 +2,7 @@
 
 import os
 from dotenv import load_dotenv
-from quantumsignals.client import Client, APIError, APIKeyError
+from quantumsignals.client import Client
 
 load_dotenv()
 

@@ -8,7 +8,7 @@ from loguru import logger
 
 from trader.config import Settings
 from trader.gateways.base import GatewayBase
-from trader.models import PerformanceTracker, Signal
+from trader.models import PerformanceTracker, Signal, sig_label
 from trader.strategy.base import StrategyBase
 
 _ET = ZoneInfo("America/New_York")
@@ -120,7 +120,7 @@ class SignalFollowerStrategy(StrategyBase):
 
         self.perf.signal_counts[sig] += 1
         logger.info(
-            f"Signal  {sym}  {_sig_label(sig)}  model={signal.model}  "
+            f"Signal  {sym}  {sig_label(sig)}  model={signal.model}  "
             f"et={et_dt.strftime('%H:%M')}"
         )
 
@@ -366,11 +366,3 @@ def _to_eastern(for_minute_utc: object) -> datetime:
     return dt_utc.astimezone(_ET)
 
 
-def _sig_label(sig: int | None) -> str:
-    if sig is None:
-        return "NONE --"
-    return {
-        Signal.UP: "UP ^",
-        Signal.STABLE: "STABLE ->",
-        Signal.DOWN: "DOWN v",
-    }.get(sig, f"?({sig})")

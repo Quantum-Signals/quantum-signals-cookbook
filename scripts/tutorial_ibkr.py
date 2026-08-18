@@ -400,7 +400,7 @@ def _handle_one_signal(signal: object, gw, resolved_contracts: dict, settings: S
         resolved_contracts[trade_sym] = contract
 
     action = "BUY" if sig_val == Signal.UP else "SELL"
-    qty = settings.position_sizes.get(trade_sym, 1)
+    qty = 1
 
     logger.info(f"  -> Placing {action} {qty}x {trade_sym}")
     trade = gw.place_order(contract, action, qty)

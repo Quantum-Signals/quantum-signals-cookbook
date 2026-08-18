@@ -41,7 +41,7 @@ A long-running Python process that:
 
 ### Tech stack
 
-Python 3.12+, `uv`, `loguru`, `python-dotenv`, `quantumsignals-client`, `alpaca-py`, `ib-async`, `pytest`.
+Python 3.12+, `uv`, `loguru`, `python-dotenv`, `quantumsignals-client` (≥ 0.6.0), `alpaca-py`, `ib-async`, `pytest`.
 
 ---
 
@@ -51,25 +51,25 @@ Python 3.12+, `uv`, `loguru`, `python-dotenv`, `quantumsignals-client`, `alpaca-
 
 ```mermaid
 flowchart TB
-    subgraph init [Startup main thread]
-        Main[app.main]
-        Config[load_settings]
-        GW[create_gateway.connect]
-        Strat[strategy.sync_positions]
+    subgraph init ["Startup (main thread)"]
+        Main["app.main"]
+        Config["load_settings"]
+        GW["create_gateway → connect"]
+        Strat["strategy.sync_positions"]
         Main --> Config --> GW --> Strat
     end
 
-    subgraph threads [Background thread]
-        QS[stream_signals_thread]
-        Q[signal_queue]
-        QS -->|SSE signals| Q
+    subgraph threads ["Background thread"]
+        QS["stream_signals_thread"]
+        Q["signal_queue"]
+        QS -->|"SSE signals"| Q
     end
 
-    subgraph loop [Main thread intraday loop]
-        Drain[Drain queue handle_signal]
-        Tick[strategy.tick 1s]
-        Report[report_once 300s]
-        EOD[EOD flatten DAY SUMMARY]
+    subgraph loop ["Main thread — intraday loop"]
+        Drain["Drain queue → handle_signal"]
+        Tick["strategy.tick (1 s)"]
+        Report["report_once (300 s)"]
+        EOD["EOD flatten → DAY SUMMARY"]
         Drain --> Tick --> Report --> EOD
     end
 
@@ -129,8 +129,8 @@ When `RUN_DAYS=0` (default), the process runs until Ctrl-C:
 
 | State | Owner | Notes |
 |-------|-------|-------|
-| Open positions | **Broker** | Source of truth |
-| Net qty, reserve, decisions | **Strategy** | In-memory; synced / reset per day |
+| Open positions | **Broker** | Source of truth; momentum re-fetches on every execution |
+| Net qty, reserve, decisions | **Strategy** | In-memory cache; synced / reset per day |
 | Closed-trade PnL, signal counts | **`PerformanceTracker`** | `perf.reset()` between days |
 | Buffered signals | **`queue.Queue`** | Optional cap via `SIGNAL_QUEUE_MAXSIZE` |
 
@@ -194,7 +194,7 @@ BROKER=ibkr        → IBGateway       (ib_async, futures + stocks)
 | Class | Notes |
 |-------|-------|
 | `GatewayBase` | `connect`, `resolve_contract`, `place_order`, `get_positions_for_sync`, … |
-| `AlpacaGateway` | Contract = ticker string; HTTP timeouts on `requests.Session` |
+| `AlpacaGateway` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
 | `IBGateway` | Qualifies futures from `symbol_map`; error 10197 = competing session |
 | `SimulatedGateway` | Jittered `sim_prices`; no external broker |
 
@@ -234,14 +234,18 @@ QuantumSignals emits objects consumed by `handle_signal(signal)`.
 
 **Null signals:** `signal.is_null_signal()` → logged and skipped.
 
-**Symbol mapping** (futures signal → ETF execution on Alpaca):
+**Symbol mapping** (QS signal → tradable instrument):
 
-| QS `signal.symbol` | Traded ticker |
-|--------------------|---------------|
-| ES, S&P500 | SPY |
-| NQ, Nasdaq100 | QQQ |
+| QS `signal.symbol` | Alpaca (ETF) | IBKR (native) | Strategies |
+|--------------------|--------------|---------------|------------|
+| ES, S&P500 | SPY | ES futures | momentum, signal_follower |
+| NQ, Nasdaq100 | QQQ | NQ futures | momentum, signal_follower |
+| SPY | SPY | SPY stock | momentum only |
+| QQQ | QQQ | QQQ stock | momentum only |
 
-Defined in `_SIGNAL_TO_TRADE` in both strategy modules. IBKR can trade native futures when listed in `config._DEFAULT_SYMBOL_MAP`.
+Defined in `_SIGNAL_TO_TRADE` in each strategy module (`momentum.py` includes `SPY`/`QQQ`; `signal_follower.py` does not). IBKR can also trade symbols listed in `config._DEFAULT_SYMBOL_MAP` (YM, RTY, MES, MNQ, CL, GC, AAPL) when signals exist and the symbol is allowed.
+
+Set `ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100`), not the ETF ticker.
 
 ---
 
@@ -265,8 +269,8 @@ qty_per_slice           = target_daily_notional_per_symbol / (executions_per_day
 target_daily_notional_per_symbol = DAILY_START_CAPITAL / n_active_symbols
 ```
 
-- `n_active_symbols` = count of keys in `_SIGNAL_TO_TRADE` that pass `ALLOWED_SYMBOLS` (minimum 1)
-- Example: `$100,000` capital, `ES` + `NQ` → **$50,000 notional per symbol per day**
+- `n_active_symbols` = count of keys in `_SIGNAL_TO_TRADE` that pass `ALLOWED_SYMBOLS` (minimum 1). With no filter, all six mapped symbols count (`ES`, `NQ`, `S&P500`, `Nasdaq100`, `SPY`, `QQQ`).
+- Example: `$100,000` capital, `ALLOWED_SYMBOLS=ES,NQ` → **$50,000 notional per symbol per day**
 
 **Broker rounding:**
 
@@ -296,60 +300,61 @@ On IBKR the same inputs yield `max(1, round(1.1776)) = 1` share per slice.
 
 #### Per-interval behavior (`handle_signal`)
 
-1. Filter: null signal, `ALLOWED_SYMBOLS`, must have ETF mapping
-2. **Interval gate:** at most one execution per symbol per `EXECUTION_INTERVAL_MINUTES` (monotonic clock `_last_exec_time`)
+1. Filter: null signal, `ALLOWED_SYMBOLS`, must have mapping in `_SIGNAL_TO_TRADE`
+2. **Interval gate:** at most one execution per symbol per `EXECUTION_INTERVAL_MINUTES`, comparing the **signal's UTC timestamp** (floored to whole seconds) against `_last_exec_time` — not wall-clock arrival time. This keeps ES and NQ aligned when they share the same QS bar timestamp.
 3. **STABLE:** no order; timer still updated
 4. **UP / DOWN:** call `_execute()`
 
-#### Ideal vs feasible net position (`_execute`)
+#### Broker-reconciled execution (`_execute`)
 
-Each UP/DOWN applies a **signed slice** to an ideal continuous position:
+Each UP/DOWN tick re-reads the **broker position** (source of truth) and plans orders to reach a feasible target:
 
 ```
-signed_slice = +qty_per_slice   (UP)
-signed_slice = -qty_per_slice   (DOWN)
-
-ideal_net = prev_net + prev_reserve + signed_slice
+current, avail_close, avg_entry = _broker_state(gw, etf_symbol)
+slice_qty = _compute_order_qty(...)
+signed_slice = ±slice_qty  (UP / DOWN)
+ideal = current + reserve + signed_slice
+target, new_reserve = _snap_target(ideal, use_fractional)
+legs = _plan_legs(current, target, avail_close, use_fractional)
 ```
 
-**Feasible target** (what the broker can hold):
+**Feasible target** (`_snap_target`):
 
 | Case | Alpaca | IBKR |
 |------|--------|------|
-| `ideal_net >= 0` | `target_net = ideal_net` (fractional OK) | `target_net = round(ideal_net)` |
-| `ideal_net < 0` | `target_net = round(ideal_net)`; leftover → `_position_reserve` | `target_net = round(ideal_net)` |
+| `ideal >= 0` | Hold fractional long exactly | `round(ideal)` whole shares |
+| `ideal < 0` | `round(ideal)` whole-share short; remainder → `_position_reserve` | `round(ideal)` whole shares |
 
-**Invariant:** `ideal_net = actual_net + reserve`
+**Invariant:** `ideal = broker_position + reserve` (reserve = 0 while ideal is non-negative on Alpaca).
 
-Alpaca rejects **fractional short** positions (error 42210000). The reserve accumulates sub-share short intent until `round()` crosses an integer boundary; then an order fires.
+Alpaca rejects **fractional short** positions (error 42210000). The reserve accumulates sub-share short intent until `round()` crosses an integer boundary.
 
-**Order placement:**
+**Order legs** (`_plan_legs`): at most two legs — **close** the opposite side, then **open** the new side — because Alpaca requires separate close/open orders when crossing through flat. Close legs are capped to `qty_available` at the broker. After a close leg, `_wait_opposite_cleared()` polls until the opposite side is gone before emitting an open leg.
 
-```
-delta = target_net - prev_net
-```
-
-- `delta > 0` → BUY `abs(delta)`
-- `delta < 0` → SELL, capped by `_cap_sell_qty()` to shares actually long at broker
-- `abs(delta) < 1e-9` → no order; reserve may still update (“accumulating intent”)
+If a leg fails, the remainder of the slice is dropped; the next interval re-plans from fresh broker state (self-healing after partial fills, manual trades, or restarts).
 
 ```mermaid
 flowchart LR
-    Signal[QS UP or DOWN] --> Gate[Interval gate]
-    Gate --> Slice[Compute slice_qty]
-    Slice --> Ideal[ideal_net = net + reserve + slice]
-    Ideal --> Feasible[Snap for short rules]
-    Feasible --> Order[place_order delta]
-    Order --> Update[Update net_qty reserve]
+    Signal["QS UP or DOWN"] --> Gate["Interval gate (signal ts)"]
+    Gate --> BrokerRead["_broker_state"]
+    BrokerRead --> Slice["Compute slice_qty"]
+    Slice --> Ideal["ideal = current + reserve + slice"]
+    Ideal --> Snap["_snap_target"]
+    Snap --> Legs["_plan_legs (close → open)"]
+    Legs --> Orders["place_order per leg"]
+    Orders --> Settle["_settle (PnL + cache)"]
 ```
 
 #### Position sync & daily reset
 
 **`sync_positions()`** (startup + pre-session):
 
-- Clears `_net_qty`, `_total_cost`, `_position_reserve`
-- Reads `gw.get_positions_for_sync()`; maps ETF ticker back to QS symbol (`SPY` → `ES`)
-- Prevents stale strategy state after overnight fills or manual closes
+- Debounced to once per 5 seconds (`_last_sync_time`)
+- Retries broker fetch up to 3 times on network errors
+- Clears `_net_qty`, `_total_cost`, `_position_reserve` only **after** a successful fetch
+- Reads `gw.get_positions_for_sync()`; maps ETF ticker back to QS symbol (`SPY` → `ES`, `QQQ` → `NQ`)
+- Ignores sub-lot dust shorts (≤ `_DUST_QTY`) when syncing
+- Preserves `_last_exec_time` cooldown timers across syncs
 
 **`reset_for_new_day()`** (after EOD flatten in `app.py`):
 
@@ -357,7 +362,11 @@ flowchart LR
 
 #### PnL tracking (momentum)
 
-Realized PnL on **closes** (position crosses zero or flips sign) is recorded in `PerformanceTracker` inside `_execute`. Open exposure is not marked-to-market in the bot tracker until flat.
+Realized PnL on **closes** (position crosses zero or flips sign) is recorded in `PerformanceTracker` inside `_settle()` after each execution tick. Open exposure is not marked-to-market in the bot tracker until flat.
+
+#### `sync_positions()` vs `signal_follower`
+
+Unlike momentum (which mirrors broker holdings into strategy state), `signal_follower.sync_positions()` **closes all existing broker positions** at startup via `_close_stale_positions()` so each day starts flat.
 
 ---
 
@@ -437,26 +446,33 @@ Momentum relies primarily on `PerformanceTracker`; signal_follower mirrors into 
 |--------|------------|-------------------|
 | Order size | Notional / interval / price | 1 share |
 | Trade frequency | Once per interval per symbol | Every signal minute with active decision |
+| Interval gate | Signal UTC timestamp | ET clock on decision grid |
 | Session logic | App supervisor (`SESSION_*`) | Hardcoded ET windows + app EOD |
+| Broker reconciliation | Re-reads broker every execution | Direct 1-share orders |
 | Short fractional | Reserve mechanism on Alpaca | Integer shares only |
-| ETF mapping | Yes | Yes |
+| ETF mapping | ES/NQ/S&P500/Nasdaq100/SPY/QQQ | ES/NQ/S&P500/Nasdaq100 only |
 
 ---
 
 ## 5. Configuration & extensibility
 
-### Environment variables (algorithm impact)
+Full operator reference (env vars, strategies, symbols, paper vs live): [README.md](README.md).
 
-Documented fully in [README.md](README.md). Keys that change trading math or universe:
+### Environment variables (algorithm impact)
 
 | Variable | Effect |
 |----------|--------|
 | `STRATEGY` | `momentum` vs `signal_follower` |
-| `DAILY_START_CAPITAL` | Momentum per-symbol daily notional; summary return % |
+| `DAILY_START_CAPITAL` | Momentum per-symbol daily notional; summary return % for both strategies |
 | `EXECUTION_INTERVAL_MINUTES` | Momentum execution gate; signal_follower decision grid |
-| `ALLOWED_SYMBOLS` | Filters QS symbols (comma-separated) |
-| `BROKER` | Alpaca fractional vs IBKR integer sizing |
+| `ALLOWED_SYMBOLS` | Filters QS symbols (comma-separated QS names, e.g. `S&P500,Nasdaq100`) |
+| `BROKER` | Alpaca fractional vs IBKR integer sizing (ignored when `DRY_RUN=true`) |
 | `DRY_RUN` | Simulated gateway — no real orders |
+| `ALPACA_PAPER` / `IB_PORT` | Paper vs live account when `DRY_RUN=false` |
+
+### Paper vs live (summary)
+
+Three layers: `DRY_RUN` (simulated) → `BROKER` (Alpaca vs IBKR) → paper/live switch (`ALPACA_PAPER` or `IB_PORT`). See [README.md § Paper Trading vs Live Trading](README.md#paper-trading-vs-live-trading).
 
 ### Code-only settings (`config.py`)
 
@@ -464,7 +480,6 @@ Documented fully in [README.md](README.md). Keys that change trading math or uni
 |---------|----------|---------|
 | `symbol_map` | `_DEFAULT_SYMBOL_MAP` | IB contract specs; **roll `lastTradeDateOrContractMonth`** |
 | `contract_multipliers` | `_DEFAULT_CONTRACT_MULTIPLIERS` | EOD flatten PnL for futures |
-| `position_sizes` | `_DEFAULT_POSITION_SIZES` | Legacy / reference sizes |
 | `sim_prices` | `_DEFAULT_SIM_PRICES` | Dry-run price seeds |
 
 ### Adding a strategy
@@ -481,7 +496,6 @@ Present on `Settings` but **not** read in `load_settings()` today:
 | Field | Default | Notes |
 |-------|---------|-------|
 | `max_stream_retries` | 5 | QS stream reconnect cap |
-| `trade_cooldown_seconds` | 60 | Reserved |
 | `use_market_orders` | true | Gateway behavior |
 
 Requires code change to tune via `.env`.
@@ -540,8 +554,11 @@ uv run python scripts/tutorial.py
 | Topic | Detail |
 |-------|--------|
 | QS disconnects | Exponential backoff; fatal after 5 retries |
+| QS symbol formats | Legacy `ES`/`NQ`, full names `S&P500`/`Nasdaq100`, or ETF tickers `SPY`/`QQQ` (momentum only) |
+| Interval gate | Momentum uses signal timestamp, not arrival time — sub-second QS timestamps are floored |
+| Broker drift | Momentum re-reads broker every execution; strategy cache is advisory only |
 | Holidays | Not detected — bot wakes; often empty day |
-| Alpaca fractional shorts | Momentum reserve; do not remove without regression tests |
+| Alpaca fractional shorts | Momentum reserve + close/open legs; do not remove without regression tests |
 | Alpaca hung HTTP | Default timeouts in `AlpacaGateway` |
 | IBKR threading | Never call gateway from QS thread |
 | IB error 10197 | Competing TWS/Gateway — close other sessions |
@@ -553,7 +570,7 @@ uv run python scripts/tutorial.py
 ### Recommended enhancements
 
 - US market holiday calendar
-- Expose `max_stream_retries`, `trade_cooldown_seconds` via env
+- Expose `max_stream_retries` via env
 - Health metric (last signal timestamp / stream alive)
 - CI workflow for `pytest` on pull requests
 - Structured metrics (Prometheus, CloudWatch)
@@ -565,7 +582,9 @@ uv run python scripts/tutorial.py
 | Question | Where to look |
 |----------|----------------|
 | How is order qty computed? | `momentum._compute_order_qty`, `_execute` |
-| Why fractional reserve? | `MomentumStrategy.__init__` docstring; `_execute` short branch |
+| Why fractional reserve? | `MomentumStrategy.__init__` docstring; `_snap_target` |
+| How are close/open legs planned? | `momentum._plan_legs`, `_broker_state` |
 | When is EOD flatten? | `app._run_trading_day`, `_close_all_positions` |
 | How are signals ingested? | `streaming.stream_signals_thread` |
 | Broker selection? | `gateways.create_gateway` |
+| QS symbol formats? | [QS documentation.md](QS%20documentation.md) |

@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 from trader.config import Settings
 from trader.gateways.simulated import SimulatedGateway

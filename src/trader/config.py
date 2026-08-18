@@ -23,11 +23,6 @@ _DEFAULT_SYMBOL_MAP: dict[str, dict] = {
     "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
 }
 
-_DEFAULT_POSITION_SIZES: dict[str, int] = {
-    "ES": 1, "NQ": 1, "YM": 1, "RTY": 1,
-    "MES": 1, "MNQ": 1, "CL": 1, "GC": 1, "AAPL": 10, "SPY": 5, "QQQ": 5,
-}
-
 _DEFAULT_SIM_PRICES: dict[str, float] = {
     "ES": 5450.00, "NQ": 19200.00, "YM": 42500.00, "RTY": 2050.00,
     "MES": 5450.00, "MNQ": 19200.00,
@@ -56,7 +51,6 @@ class Settings:
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
     alpaca_paper: bool = True
-    trade_cooldown_seconds: int = 60
     use_market_orders: bool = True
     max_stream_retries: int = 5
     strategy: str = "momentum"  # "momentum" or "signal_follower"
@@ -81,7 +75,6 @@ class Settings:
     #   N = exit after N EODs.
     run_days: int = 0
     symbol_map: dict[str, dict] = field(default_factory=lambda: dict(_DEFAULT_SYMBOL_MAP))
-    position_sizes: dict[str, int] = field(default_factory=lambda: dict(_DEFAULT_POSITION_SIZES))
     sim_prices: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_SIM_PRICES))
     contract_multipliers: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_CONTRACT_MULTIPLIERS))
 

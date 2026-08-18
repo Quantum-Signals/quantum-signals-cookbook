@@ -1,7 +1,5 @@
 from dataclasses import dataclass
 
-import pytest
-
 from trader.config import Settings
 from trader.gateways.simulated import SimulatedGateway
 from trader.models import PerformanceTracker, Signal
@@ -31,12 +29,9 @@ class FakeSignal:
         return self._null
 
 
-def _make_strategy(per_minute_qtys=None, **settings_kw):
-    """Create a strategy with sizing pre-configured for deterministic tests.
-
-    By default each symbol trades exactly 1 contract per minute so older test
-    expectations (1 signal → 1 contract) still hold.  The day is seeded to
-    2026-04-14 so that ``_reset_day`` is not triggered on first signal.
+def _make_strategy(**settings_kw):
+    """Create a strategy seeded to 2026-04-14 so ``_reset_day`` is not
+    triggered on first signal. Pre-market cleanup is marked done.
     """
     from datetime import date
 
@@ -46,12 +41,6 @@ def _make_strategy(per_minute_qtys=None, **settings_kw):
     perf = PerformanceTracker()
     strategy = SignalFollowerStrategy(gw, perf, settings)
 
-    if per_minute_qtys is None:
-        per_minute_qtys = {"ES": 1.0, "NQ": 1.0, "YM": 1.0, "RTY": 1.0,
-                           "AAPL": 1.0, "SPY": 1.0, "UNKNOWN_SYM": 1.0}
-    strategy._per_minute_qty = dict(per_minute_qtys)
-    strategy._day_open_price = {sym: 1.0 for sym in per_minute_qtys}
-    strategy._sizing_ready = True
     strategy._current_date = date(2026, 4, 14)
     strategy._pre_market_done = True
 
@@ -253,14 +242,13 @@ class TestSignalFollowerDayReset:
         )
         assert strategy._net_qty.get("ES") == 1
 
-        # Day 2: _reset_day clears everything; _compute_sizing runs as fallback
+        # Day 2: _reset_day clears per-day state
         strategy.handle_signal(
             FakeSignal(
                 symbol="ES", signal=Signal.DOWN,
                 for_minute_utc="2026-04-15T13:45:00Z",
             )
         )
-        assert strategy._sizing_ready is True
         assert strategy._current_date.day == 15
 
     def test_daily_pnl_resets_on_new_day(self):
@@ -380,108 +368,3 @@ class TestPreMarketCleanup:
         assert gw.get_open_positions()[0]["pos"] == 2
 
 
-# =====================================================================
-# Price collection & dynamic sizing
-# =====================================================================
-
-class TestPriceCollection:
-    def test_prices_collected_during_window(self):
-        pytest.skip("dynamic price collection not yet implemented in SignalFollowerStrategy")
-        """Signals between 9:15 and 9:45 should trigger price collection."""
-        strategy, gw, perf = _make_strategy()
-        strategy._sizing_ready = False  # override default test setup
-
-        strategy.handle_signal(
-            FakeSignal(symbol="ES", signal=Signal.DOWN, for_minute_utc=_utc_ts(9, 20))
-        )
-        strategy.handle_signal(
-            FakeSignal(symbol="ES", signal=Signal.DOWN, for_minute_utc=_utc_ts(9, 25))
-        )
-        assert len(strategy._collected_prices.get("ES", [])) == 2
-        assert len(gw.get_open_positions()) == 0  # no trades during collection
-
-    def test_sizing_computed_at_first_trading_signal(self):
-        pytest.skip("dynamic sizing not yet implemented in SignalFollowerStrategy")
-        """At 9:45 sizing should be derived from collected prices."""
-        settings = _make_settings()
-        gw = SimulatedGateway(settings)
-        gw.connect()
-        perf = PerformanceTracker()
-        strategy = SignalFollowerStrategy(gw, perf, settings)
-
-        for minute in range(15, 45):
-            strategy.handle_signal(
-                FakeSignal(symbol="ES", signal=Signal.DOWN, for_minute_utc=_utc_ts(9, minute))
-            )
-
-        assert not strategy._sizing_ready
-        assert len(strategy._collected_prices.get("ES", [])) == 30
-
-        strategy.handle_signal(
-            FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
-        )
-
-        assert strategy._sizing_ready
-        assert "ES" in strategy._day_open_price
-        assert strategy._per_minute_qty["ES"] > 0
-
-    def test_fallback_sizing_when_no_prices_collected(self):
-        pytest.skip("dynamic sizing not yet implemented in SignalFollowerStrategy")
-        """If bot starts at 9:45 with no collection, sizing uses live price."""
-        settings = _make_settings()
-        gw = SimulatedGateway(settings)
-        gw.connect()
-        perf = PerformanceTracker()
-        strategy = SignalFollowerStrategy(gw, perf, settings)
-
-        strategy.handle_signal(
-            FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
-        )
-        assert strategy._sizing_ready
-        assert "ES" in strategy._per_minute_qty
-        assert strategy._per_minute_qty["ES"] > 0
-
-
-class TestAccumulatorSizing:
-    def test_fractional_accumulation(self):
-        pytest.skip("fractional accumulator not yet implemented in SignalFollowerStrategy")
-        """With per_minute_qty < 1, trades only happen when accumulator >= 1."""
-        strategy, gw, perf = _make_strategy(per_minute_qtys={"ES": 0.3})
-
-        # 3 signals at 0.3 each → accumulator = 0.9 → no trade yet
-        for minute in range(45, 48):
-            strategy.handle_signal(
-                FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, minute))
-            )
-        assert len(gw.get_open_positions()) == 0
-
-        # 4th signal → accumulator = 1.2 → trade 1, remainder 0.2
-        strategy.handle_signal(
-            FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 48))
-        )
-        assert gw.get_open_positions()[0]["pos"] == 1
-        assert strategy._qty_accumulator["ES"] == pytest.approx(0.2, abs=0.01)
-
-    def test_large_per_minute_trades_multiple(self):
-        pytest.skip("fractional accumulator not yet implemented in SignalFollowerStrategy")
-        """With per_minute_qty > 1, multiple contracts per signal."""
-        strategy, gw, perf = _make_strategy(per_minute_qtys={"ES": 2.5})
-
-        strategy.handle_signal(
-            FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
-        )
-        assert gw.get_open_positions()[0]["pos"] == 2
-        assert strategy._qty_accumulator["ES"] == pytest.approx(0.5, abs=0.01)
-
-    def test_accumulator_restores_on_failed_order(self):
-        """If resolve_contract fails, the accumulator should be restored."""
-        strategy, gw, perf = _make_strategy(
-            per_minute_qtys={"UNKNOWN_SYM": 1.0},
-            allowed_symbols=("UNKNOWN_SYM",),
-        )
-        # UNKNOWN_SYM will auto-create in sim, so this actually succeeds.
-        # Test that normal flow works even for non-configured symbols.
-        strategy.handle_signal(
-            FakeSignal(symbol="UNKNOWN_SYM", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
-        )
-        assert len(gw.get_open_positions()) == 1
