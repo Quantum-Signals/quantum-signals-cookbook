@@ -54,7 +54,7 @@ flowchart TB
     subgraph init ["Startup (main thread)"]
         Main["app.main"]
         Config["load_settings"]
-        GW["create_gateway → connect"]
+        GW["create_broker → connect"]
         Strat["strategy.sync_positions"]
         Main --> Config --> GW --> Strat
     end
@@ -85,7 +85,7 @@ Order of operations in [`src/trader/app.py`](src/trader/app.py):
 |------|--------|
 | 1 | `_setup_logging()` — stderr + first day log file |
 | 2 | `load_settings()` — `.env` + env vars + optional `--execution-interval` |
-| 3 | `create_gateway(settings)` → `gw.connect()` |
+| 3 | `create_broker(settings)` → `broker.connect()` |
 | 4 | `_log_model_catalog()` — QS models (best-effort) |
 | 5 | Instantiate strategy from `app._STRATEGIES` |
 | 6 | `strategy.sync_positions()` — broker → strategy state |
@@ -100,15 +100,15 @@ Order of operations in [`src/trader/app.py`](src/trader/app.py):
 |---------|------|---------|
 | Continuous | Drain `signal_queue` → `strategy.handle_signal()` | React to QS signals |
 | 1 s | `strategy.tick()` | Time-driven logic (`signal_follower` close window) |
-| 300 s | `report_once(gw, perf)` | Account NLV, positions, bot PnL |
+| 300 s | `report_once(broker, perf)` | Account NLV, positions, bot PnL |
 | Session end | `datetime >= SESSION_END_TIME` | Exit loop → EOD flatten |
 
 ### Threading model
 
-**Critical:** [`streaming.py`](src/trader/streaming.py) runs QS I/O in a daemon thread and only enqueues signal objects. The **main thread** must execute all `ib_async` / gateway / strategy calls because IBKR was connected on the main thread.
+**Critical:** [`streaming.py`](src/trader/streaming.py) runs QS I/O in a daemon thread and only enqueues signal objects. The **main thread** must execute all `ib_async` / broker / strategy calls because IBKR was connected on the main thread.
 
 ```
-QS stream thread  →  signal_queue  →  main thread (strategy + gateway)
+QS stream thread  →  signal_queue  →  main thread (strategy + broker)
 ```
 
 ### Multi-day supervisor
@@ -163,7 +163,7 @@ live-trader/
 │   ├── models.py           # Signal enum, PerformanceTracker
 │   ├── streaming.py        # QS SSE → queue
 │   ├── reporting.py        # report_once snapshots
-│   ├── gateways/           # Broker abstraction
+│   ├── brokers/            # Broker abstraction
 │   └── strategy/           # momentum, signal_follower
 ├── tests/
 └── scripts/                # tutorial, QS test, multiday sim
@@ -177,26 +177,26 @@ live-trader/
 | Orchestration | `app.py` | `main`, `_run_trading_day`, `_close_all_positions`, `_sleep_until` |
 | Config | `config.py` | `Settings`, `load_settings` |
 | Ingestion | `streaming.py` | `stream_signals_thread` |
-| Execution | `gateways/*` | `create_gateway`, `GatewayBase` implementations |
+| Execution | `brokers/*` | `create_broker`, `BrokerBase` implementations |
 | Logic | `strategy/*` | `MomentumStrategy`, `SignalFollowerStrategy` |
 | Metrics | `models.py`, `reporting.py` | `PerformanceTracker`, `report_once` |
 
-### Gateways (`src/trader/gateways/`)
+### Brokers (`src/trader/brokers/`)
 
-Factory in [`__init__.py`](src/trader/gateways/__init__.py):
+Factory in [`__init__.py`](src/trader/brokers/__init__.py):
 
 ```
-DRY_RUN=true       → SimulatedGateway
-BROKER=alpaca      → AlpacaGateway   (REST, ETFs, fractional longs)
-BROKER=ibkr        → IBGateway       (ib_async, futures + stocks)
+DRY_RUN=true       → SimulatedBroker
+BROKER=alpaca      → AlpacaBroker   (REST, ETFs, fractional longs)
+BROKER=ibkr        → IBBroker       (ib_async, futures + stocks)
 ```
 
 | Class | Notes |
 |-------|-------|
-| `GatewayBase` | `connect`, `resolve_contract`, `place_order`, `get_positions_for_sync`, … |
-| `AlpacaGateway` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
-| `IBGateway` | Qualifies futures from `symbol_map`; error 10197 = competing session |
-| `SimulatedGateway` | Jittered `sim_prices`; no external broker |
+| `BrokerBase` | `connect`, `resolve_contract`, `place_order`, `get_positions_for_sync`, … |
+| `AlpacaBroker` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
+| `IBBroker` | Qualifies futures from `symbol_map`; error 10197 = competing session |
+| `SimulatedBroker` | Jittered `sim_prices`; no external broker |
 
 ### Strategies (`src/trader/strategy/`)
 
@@ -310,7 +310,7 @@ On IBKR the same inputs yield `max(1, round(1.1776)) = 1` share per slice.
 Each UP/DOWN tick re-reads the **broker position** (source of truth) and plans orders to reach a feasible target:
 
 ```
-current, avail_close, avg_entry = _broker_state(gw, etf_symbol)
+current, avail_close, avg_entry = _broker_state(broker, etf_symbol)
 slice_qty = _compute_order_qty(...)
 signed_slice = ±slice_qty  (UP / DOWN)
 ideal = current + reserve + signed_slice
@@ -352,7 +352,7 @@ flowchart LR
 - Debounced to once per 5 seconds (`_last_sync_time`)
 - Retries broker fetch up to 3 times on network errors
 - Clears `_net_qty`, `_total_cost`, `_position_reserve` only **after** a successful fetch
-- Reads `gw.get_positions_for_sync()`; maps ETF ticker back to QS symbol (`SPY` → `ES`, `QQQ` → `NQ`)
+- Reads `broker.get_positions_for_sync()`; maps ETF ticker back to QS symbol (`SPY` → `ES`, `QQQ` → `NQ`)
 - Ignores sub-lot dust shorts (≤ `_DUST_QTY`) when syncing
 - Preserves `_last_exec_time` cooldown timers across syncs
 
@@ -467,7 +467,7 @@ Full operator reference (env vars, strategies, symbols, paper vs live): [README.
 | `EXECUTION_INTERVAL_MINUTES` | Momentum execution gate; signal_follower decision grid |
 | `ALLOWED_SYMBOLS` | Filters QS symbols (comma-separated QS names, e.g. `S&P500,Nasdaq100`) |
 | `BROKER` | Alpaca fractional vs IBKR integer sizing (ignored when `DRY_RUN=true`) |
-| `DRY_RUN` | Simulated gateway — no real orders |
+| `DRY_RUN` | Simulated broker — no real orders |
 | `ALPACA_PAPER` / `IB_PORT` | Paper vs live account when `DRY_RUN=false` |
 
 ### Paper vs live (summary)
@@ -496,7 +496,7 @@ Present on `Settings` but **not** read in `load_settings()` today:
 | Field | Default | Notes |
 |-------|---------|-------|
 | `max_stream_retries` | 5 | QS stream reconnect cap |
-| `use_market_orders` | true | Gateway behavior |
+| `use_market_orders` | true | Broker behavior |
 
 Requires code change to tune via `.env`.
 
@@ -529,7 +529,7 @@ uv run pytest -v
 | File | Covers |
 |------|--------|
 | `tests/test_models.py` | `PerformanceTracker` |
-| `tests/test_simulated_gateway.py` | `SimulatedGateway` |
+| `tests/test_simulated_broker.py` | `SimulatedBroker` |
 | `tests/test_strategy.py` | `MomentumStrategy` + `FakeSignal` |
 | `tests/test_signal_follower.py` | ET windows, flatten, filters |
 
@@ -559,8 +559,8 @@ uv run python scripts/tutorial.py
 | Broker drift | Momentum re-reads broker every execution; strategy cache is advisory only |
 | Holidays | Not detected — bot wakes; often empty day |
 | Alpaca fractional shorts | Momentum reserve + close/open legs; do not remove without regression tests |
-| Alpaca hung HTTP | Default timeouts in `AlpacaGateway` |
-| IBKR threading | Never call gateway from QS thread |
+| Alpaca hung HTTP | Default timeouts in `AlpacaBroker` |
+| IBKR threading | Never call broker from QS thread |
 | IB error 10197 | Competing TWS/Gateway — close other sessions |
 | Position drift | Pre-session `sync_positions()` — broker is truth |
 | Futures roll | Update `lastTradeDateOrContractMonth` in `config.py` |
@@ -586,5 +586,5 @@ uv run python scripts/tutorial.py
 | How are close/open legs planned? | `momentum._plan_legs`, `_broker_state` |
 | When is EOD flatten? | `app._run_trading_day`, `_close_all_positions` |
 | How are signals ingested? | `streaming.stream_signals_thread` |
-| Broker selection? | `gateways.create_gateway` |
+| Broker selection? | `brokers.create_broker` |
 | QS symbol formats? | [QS documentation.md](QS%20documentation.md) |

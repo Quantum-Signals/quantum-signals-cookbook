@@ -8,7 +8,7 @@ from typing import Optional
 from loguru import logger
 
 from trader.config import Settings
-from trader.gateways.base import GatewayBase, OrderResult
+from trader.brokers.base import BrokerBase, OrderResult
 
 
 @dataclass
@@ -19,7 +19,7 @@ class SimContract:
     currency: str
 
 
-class SimulatedGateway(GatewayBase):
+class SimulatedBroker(BrokerBase):
     """
     In-memory broker that logs trades without connecting to anything.
     Prices jitter around configured sim prices so the PnL logic gets exercised.
@@ -64,10 +64,10 @@ class SimulatedGateway(GatewayBase):
         }
 
     def connect(self) -> None:
-        logger.success("[SIM] Simulated gateway connected (DRY-RUN mode)")
+        logger.success("[SIM] Simulated broker connected (DRY-RUN mode)")
 
     def disconnect(self) -> None:
-        logger.info("[SIM] Simulated gateway disconnected")
+        logger.info("[SIM] Simulated broker disconnected")
 
     def resolve_contract(self, qs_symbol: str) -> Optional[SimContract]:
         spec = self._symbol_map.get(qs_symbol)

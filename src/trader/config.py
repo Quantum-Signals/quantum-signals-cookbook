@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 
-# Symbol → broker-native contract mapping now lives with each gateway that owns
-# it (each broker encodes symbols differently): see AlpacaGateway.DEFAULT_SYMBOL_MAP
-# (QS → ETF ticker), IBGateway.DEFAULT_SYMBOL_MAP (QS → futures/stock spec), and
-# SimulatedGateway.DEFAULT_SYMBOL_MAP / DEFAULT_PRICES. Settings.symbol_map and
-# Settings.sim_prices below stay as optional overrides (empty = use the gateway's
+# Symbol → broker-native contract mapping now lives with each broker that owns
+# it (each broker encodes symbols differently): see AlpacaBroker.DEFAULT_SYMBOL_MAP
+# (QS → ETF ticker), IBBroker.DEFAULT_SYMBOL_MAP (QS → futures/stock spec), and
+# SimulatedBroker.DEFAULT_SYMBOL_MAP / DEFAULT_PRICES. Settings.symbol_map and
+# Settings.sim_prices below stay as optional overrides (empty = use the broker's
 # own default). Contract multipliers are broker-neutral PnL math and stay here.
 
 # Point-value per contract, used for end-of-day PnL in app.py. Futures carry a
@@ -62,8 +62,8 @@ class Settings:
     #   1 = single-day mode (legacy behaviour: exit after first EOD).
     #   N = exit after N EODs.
     run_days: int = 0
-    # Optional overrides for a gateway's own symbol map / sim prices.
-    # Empty (the default) means "use the gateway's DEFAULT_SYMBOL_MAP / DEFAULT_PRICES".
+    # Optional overrides for a broker's own symbol map / sim prices.
+    # Empty (the default) means "use the broker's DEFAULT_SYMBOL_MAP / DEFAULT_PRICES".
     symbol_map: dict[str, dict] = field(default_factory=dict)
     sim_prices: dict[str, float] = field(default_factory=dict)
     contract_multipliers: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_CONTRACT_MULTIPLIERS))

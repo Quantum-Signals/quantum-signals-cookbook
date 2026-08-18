@@ -10,7 +10,7 @@ from loguru import logger
 from requests.exceptions import ReadTimeout, ConnectionError
 from urllib3.exceptions import ProtocolError
 from trader.config import Settings
-from trader.gateways.base import GatewayBase, normalize_position_side
+from trader.brokers.base import BrokerBase, normalize_position_side
 from trader.models import PerformanceTracker, Signal, sig_label
 from trader.strategy.base import StrategyBase
 
@@ -114,11 +114,11 @@ class MomentumStrategy(StrategyBase):
 
     def __init__(
         self,
-        gw: GatewayBase,
+        broker: BrokerBase,
         perf: PerformanceTracker,
         settings: Settings,
     ) -> None:
-        self.gw = gw
+        self.broker = broker
         self.perf = perf
         self._settings = settings
 
@@ -195,7 +195,7 @@ class MomentumStrategy(StrategyBase):
         pos_list = []
         for attempt in range(3):
             try:
-                pos_list = self.gw.get_positions_for_sync()
+                pos_list = self.broker.get_positions_for_sync()
                 break
             except (ReadTimeout, ConnectionError, ProtocolError) as e:
                 if attempt < 2:
@@ -292,7 +292,7 @@ class MomentumStrategy(StrategyBase):
         signal timestamps — not wall-clock arrival times.
         """
         trade_sym = _SIGNAL_TO_TRADE[sym]
-        contract = self.gw.resolve_contract(trade_sym)
+        contract = self.broker.resolve_contract(trade_sym)
         if contract is None:
             logger.warning(
                 f"  -> No tradable contract for {trade_sym} — skipping "
@@ -315,7 +315,7 @@ class MomentumStrategy(StrategyBase):
         self._last_exec_time[sym] = signal_ts
 
         # The broker is the only source of truth for the current position.
-        current, avail_close, avg_entry = _broker_state(self.gw, trade_sym)
+        current, avail_close, avg_entry = _broker_state(self.broker, trade_sym)
 
         known = self._net_qty.get(sym, 0.0)
         if abs(current - known) > _DUST_QTY:
@@ -346,13 +346,13 @@ class MomentumStrategy(StrategyBase):
         prev_intent: Optional[str] = None
         for leg in legs:
             if leg.intent == "open" and prev_intent == "close":
-                if not _wait_opposite_cleared(self.gw, trade_sym, leg.action):
+                if not _wait_opposite_cleared(self.broker, trade_sym, leg.action):
                     logger.warning(
                         f"  -> Broker still shows the opposite position for "
                         f"{trade_sym} after close — skipping open leg"
                     )
                     break
-            trade = self.gw.place_order(
+            trade = self.broker.place_order(
                 contract, leg.action, leg.qty, price, position_intent=leg.intent,
             )
             if trade is None:
@@ -380,7 +380,7 @@ class MomentumStrategy(StrategyBase):
         """Fetch the last price, retrying on dropped/stale connections."""
         for attempt in range(3):
             try:
-                return self.gw.get_last_price(contract)
+                return self.broker.get_last_price(contract)
             except (ConnectionError, ProtocolError):
                 if attempt < 2:
                     logger.warning(
@@ -537,11 +537,11 @@ def _floor_leg(qty: float, use_fractional: bool) -> float:
 # Broker state helpers
 # ------------------------------------------------------------------
 
-def _broker_position(gw: GatewayBase, etf_symbol: str) -> dict | None:
+def _broker_position(broker: BrokerBase, etf_symbol: str) -> dict | None:
     """Return the broker position dict for *etf_symbol*, or None if flat."""
     for attempt in range(3):
         try:
-            for p in gw.get_positions_for_sync():
+            for p in broker.get_positions_for_sync():
                 if p["symbol"] == etf_symbol:
                     return p
             return None
@@ -559,13 +559,13 @@ def _broker_position(gw: GatewayBase, etf_symbol: str) -> dict | None:
                 raise
 
 
-def _broker_state(gw: GatewayBase, etf_symbol: str) -> tuple[float, float, Optional[float]]:
+def _broker_state(broker: BrokerBase, etf_symbol: str) -> tuple[float, float, Optional[float]]:
     """Return ``(signed_qty, qty_available, avg_entry_price)`` from the broker.
 
     ``qty_available`` is unsigned and capped by what the broker reports as
     free to close (shares not tied up in other open orders).
     """
-    pos = _broker_position(gw, etf_symbol)
+    pos = _broker_position(broker, etf_symbol)
     if pos is None:
         return 0.0, 0.0, None
     qty = float(pos["qty"])
@@ -578,7 +578,7 @@ def _broker_state(gw: GatewayBase, etf_symbol: str) -> tuple[float, float, Optio
 
 
 def _wait_opposite_cleared(
-    gw: GatewayBase,
+    broker: BrokerBase,
     etf_symbol: str,
     open_action: str,
     timeout: float = 3.0,
@@ -591,7 +591,7 @@ def _wait_opposite_cleared(
     """
 
     def _cleared() -> bool:
-        current, _, _ = _broker_state(gw, etf_symbol)
+        current, _, _ = _broker_state(broker, etf_symbol)
         if open_action == "BUY":
             return current >= -_BROKER_EPS
         return current <= _BROKER_EPS

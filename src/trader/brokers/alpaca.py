@@ -7,7 +7,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from trader.config import Settings
-from trader.gateways.base import GatewayBase, OrderResult, normalize_position_side
+from trader.brokers.base import BrokerBase, OrderResult, normalize_position_side
 
 # Alpaca's RESTClient uses ``requests.Session`` without per-call timeouts, so a
 # stalled TCP connection can block the main trading loop forever (e.g. during
@@ -29,8 +29,8 @@ def _install_default_request_timeout(rest_client: object, timeout: tuple[float, 
     session.request = request_with_default_timeout  # type: ignore[method-assign]
 
 
-class AlpacaGateway(GatewayBase):
-    """Broker gateway backed by the Alpaca REST API (alpaca-py).
+class AlpacaBroker(BrokerBase):
+    """Broker backed by the Alpaca REST API (alpaca-py).
 
     Supports equity / ETF trading only, so it owns its own symbol map:
     QuantumSignals symbol → tradable Alpaca ticker. Futures signals (ES, NQ,
@@ -38,7 +38,7 @@ class AlpacaGateway(GatewayBase):
     ``settings.symbol_map`` overrides ``DEFAULT_SYMBOL_MAP`` when non-empty
     (values are plain tickers).
 
-    The ``contract`` object used throughout this gateway is a plain ticker
+    The ``contract`` object used throughout this broker is a plain ticker
     string (e.g. ``"SPY"``), which is sufficient for all Alpaca REST calls.
     ``place_order`` returns a broker-agnostic ``OrderResult`` with the fill
     price already resolved.
@@ -90,7 +90,7 @@ class AlpacaGateway(GatewayBase):
 
     def disconnect(self) -> None:
         # Alpaca is REST-based; no persistent socket to close.
-        logger.info("Alpaca gateway disconnected (REST — nothing to tear down)")
+        logger.info("Alpaca broker disconnected (REST — nothing to tear down)")
 
     # ------------------------------------------------------------------
     # Contract resolution

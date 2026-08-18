@@ -8,10 +8,10 @@ from typing import Optional
 from loguru import logger
 
 from trader.config import Settings
-from trader.gateways.base import GatewayBase, OrderResult
+from trader.brokers.base import BrokerBase, OrderResult
 
 
-class IBGateway(GatewayBase):
+class IBBroker(BrokerBase):
     """Thin, synchronous wrapper around ib_async for order management.
 
     Owns its own symbol map: QuantumSignals symbol → IBKR contract spec

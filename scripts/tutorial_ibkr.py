@@ -67,7 +67,7 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from trader.config import Settings, load_settings
-from trader.gateways import create_gateway
+from trader.brokers import create_broker
 from trader.models import PerformanceTracker, Signal
 
 
@@ -80,8 +80,8 @@ from trader.models import PerformanceTracker, Signal
 #
 # Key variables:
 #   QUANTUMSIGNALS_API_KEY  (required)
-#   DRY_RUN                 true  → use SimulatedGateway (no real orders)
-#                           false → use IBGateway (real orders via IB Gateway)
+#   DRY_RUN                 true  → use SimulatedBroker (no real orders)
+#                           false → use IBBroker (real orders via IB Gateway)
 #   IB_HOST / IB_PORT / IB_CLIENT_ID
 #   IB_MARKET_DATA_TYPE     4 = delayed-frozen (works without live data sub)
 #   STRATEGY                "momentum" or "signal_follower"
@@ -97,7 +97,7 @@ def step1_load_config() -> Settings:
 
     settings = load_settings()  # builds the frozen Settings dataclass
 
-    log_step("Dry-run mode  : " + ("YES — orders go to SimulatedGateway" if settings.dry_run
+    log_step("Dry-run mode  : " + ("YES — orders go to SimulatedBroker" if settings.dry_run
                                    else "NO  — orders go to IB Gateway"))
     log_step(f"IB Gateway    : {settings.ib_host}:{settings.ib_port}  clientId={settings.ib_client_id}")
     log_step(f"Market data   : type {settings.ib_market_data_type}"
@@ -113,11 +113,11 @@ def step1_load_config() -> Settings:
 # STEP 2 — Connect to Interactive Brokers
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# create_gateway() returns:
-#   IBGateway         when DRY_RUN=false
-#   SimulatedGateway  when DRY_RUN=true
+# create_broker() returns:
+#   IBBroker         when DRY_RUN=false
+#   SimulatedBroker  when DRY_RUN=true
 #
-# IBGateway.connect() does three things:
+# IBBroker.connect() does three things:
 #   1. util.startLoop()   — starts ib_async's asyncio event loop on this thread.
 #                           ALL subsequent IB API calls (qualify, place_order,
 #                           get_last_price…) MUST run on this same thread.
@@ -135,12 +135,12 @@ def step1_load_config() -> Settings:
 def step2_connect_ibkr(settings: Settings):
     banner("STEP 2 — Connect to Interactive Brokers")
 
-    gw = create_gateway(settings)  # IBGateway or SimulatedGateway
+    broker = create_broker(settings)  # IBBroker or SimulatedBroker
 
-    log_step(f"Gateway type  : {type(gw).__name__}")
+    log_step(f"Broker type   : {type(broker).__name__}")
 
     try:
-        gw.connect()
+        broker.connect()
         log_step("IB Gateway connection successful")
     except Exception as exc:
         logger.critical(f"Cannot connect to IB Gateway: {exc}")
@@ -148,12 +148,12 @@ def step2_connect_ibkr(settings: Settings):
         sys.exit(1)
 
     # Quick account snapshot to confirm we are wired in.
-    account = gw.get_account_summary()
+    account = broker.get_account_summary()
     log_step(f"Net liquidation  : ${account['net_liquidation']:>12,.2f}")
     log_step(f"Buying power     : ${account['buying_power']:>12,.2f}")
     log_step(f"Unrealised PnL   : ${account['unrealized_pnl']:>12,.2f}")
 
-    return gw
+    return broker
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -278,20 +278,20 @@ def step4_start_signal_stream(
 # ══════════════════════════════════════════════════════════════════════════════
 #
 # Before placing any order IB needs a fully qualified Contract object.
-# gw.resolve_contract(symbol) looks up the symbol in the gateway's own symbol
-# map (IBGateway.DEFAULT_SYMBOL_MAP, overridable via settings.symbol_map),
+# broker.resolve_contract(symbol) looks up the symbol in the broker's own symbol
+# map (IBBroker.DEFAULT_SYMBOL_MAP, overridable via settings.symbol_map),
 # constructs an ib_async.Contract, then calls ib.qualifyContracts() to fill
 # in the conId (IB's unique contract identifier).
 #
 # Results are cached — the first call per symbol does a round-trip to IB;
 # subsequent calls are instant.
 #
-# IBGateway.DEFAULT_SYMBOL_MAP supports:
+# IBBroker.DEFAULT_SYMBOL_MAP supports:
 #   Futures : ES, NQ, YM, RTY, CL, GC, MES, MNQ  (CME/CBOT/NYMEX/COMEX)
 #   Equities: AAPL, SPY, QQQ  (SMART exchange)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def step5_resolve_contracts(gw, settings: Settings) -> dict:
+def step5_resolve_contracts(broker, settings: Settings) -> dict:
     banner("STEP 5 — Resolve IB contracts")
 
     resolved = {}
@@ -299,7 +299,7 @@ def step5_resolve_contracts(gw, settings: Settings) -> dict:
 
     for sym in symbols_to_check:
         log_step(f"Resolving {sym}…")
-        contract = gw.resolve_contract(sym)
+        contract = broker.resolve_contract(sym)
         if contract is not None:
             resolved[sym] = contract
             log_step(f"  {sym} → {contract}")
@@ -313,7 +313,7 @@ def step5_resolve_contracts(gw, settings: Settings) -> dict:
 # STEP 6 — Inspect open positions (sync state with broker)
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# gw.get_positions_for_sync() returns a list of dicts:
+# broker.get_positions_for_sync() returns a list of dicts:
 #   {"symbol": str, "qty": int, "avg_price": float}
 #
 # Strategies call this at startup to either:
@@ -321,10 +321,10 @@ def step5_resolve_contracts(gw, settings: Settings) -> dict:
 #   - SignalFollower: close any leftover positions from a previous session.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def step6_inspect_positions(gw) -> None:
+def step6_inspect_positions(broker) -> None:
     banner("STEP 6 — Inspect open positions at broker")
 
-    positions = gw.get_positions_for_sync()
+    positions = broker.get_positions_for_sync()
 
     if not positions:
         log_step("No open positions — clean slate, ready to trade")
@@ -357,7 +357,7 @@ def step6_inspect_positions(gw) -> None:
 #   DOWN signal → SELL 1 share of the mapped ETF
 #   STABLE / null → no order placed
 #
-# Order execution via gw.place_order(contract, action, qty, price=None):
+# Order execution via broker.place_order(contract, action, qty, price=None):
 #   - By default (use_market_orders=True) sends an IB MarketOrder.
 #   - Polls up to 5 seconds for a fill, then returns the Trade object.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -369,7 +369,7 @@ _SIGNAL_TO_TRADE = {"ES": "SPY", "NQ": "QQQ"}
 _SIG_LABEL = {0: "DOWN  v", 1: "STABLE ->", 2: "UP    ^"}
 
 
-def _handle_one_signal(signal: object, gw, resolved_contracts: dict, settings: Settings) -> None:
+def _handle_one_signal(signal: object, broker, resolved_contracts: dict, settings: Settings) -> None:
     """Demonstrate acting on a single QS signal."""
     sym: str = signal.symbol
 
@@ -394,7 +394,7 @@ def _handle_one_signal(signal: object, gw, resolved_contracts: dict, settings: S
     contract = resolved_contracts.get(trade_sym)
     if contract is None:
         # Try to resolve on-the-fly (result is cached)
-        contract = gw.resolve_contract(trade_sym)
+        contract = broker.resolve_contract(trade_sym)
         if contract is None:
             logger.warning(f"  No contract for {trade_sym} — skipping")
             return
@@ -404,10 +404,10 @@ def _handle_one_signal(signal: object, gw, resolved_contracts: dict, settings: S
     qty = 1
 
     logger.info(f"  -> Placing {action} {qty}x {trade_sym}")
-    trade = gw.place_order(contract, action, qty)
+    trade = broker.place_order(contract, action, qty)
 
     if trade is not None:
-        # Fill price from IB Trade object or SimulatedGateway dict
+        # Fill price from IB Trade object or SimulatedBroker dict
         if isinstance(trade, dict):
             fill = trade.get("price")
         else:
@@ -417,7 +417,7 @@ def _handle_one_signal(signal: object, gw, resolved_contracts: dict, settings: S
 
 
 def step7_run_event_loop(
-    gw,
+    broker,
     settings: Settings,
     stop_event: threading.Event,
     signal_queue: "queue.Queue[object | None]",
@@ -457,7 +457,7 @@ def step7_run_event_loop(
                             and (not settings.allowed_symbols or item.symbol in settings.allowed_symbols)
                             and item.signal in (Signal.UP, Signal.DOWN)
                         )
-                        _handle_one_signal(item, gw, resolved_contracts, settings)
+                        _handle_one_signal(item, broker, resolved_contracts, settings)
                         if was_actionable:
                             signals_acted_on += 1
                     except Exception as exc:
@@ -480,7 +480,7 @@ def step7_run_event_loop(
 
             # ── C. Periodic report ────────────────────────────────────────────
             if now >= next_report_at:
-                _print_status(gw, perf)
+                _print_status(broker, perf)
                 next_report_at = now + report_interval_s
 
             time.sleep(poll_s)
@@ -491,12 +491,12 @@ def step7_run_event_loop(
         stop_event.set()
 
 
-def _print_status(gw, perf: PerformanceTracker) -> None:
+def _print_status(broker, perf: PerformanceTracker) -> None:
     """Print a brief account + PnL snapshot."""
     logger.info("─" * 60)
     logger.info("STATUS REPORT")
     try:
-        account = gw.get_account_summary()
+        account = broker.get_account_summary()
         logger.info(f"  Net liquidation : ${account['net_liquidation']:>12,.2f}")
         logger.info(f"  Unrealised PnL  : ${account['unrealized_pnl']:>12,.2f}")
     except Exception:
@@ -513,35 +513,35 @@ def _print_status(gw, perf: PerformanceTracker) -> None:
 # If CLOSE_ON_EXIT=true (default) the bot flattens all open positions before
 # disconnecting so you never carry overnight exposure unintentionally.
 #
-# gw.get_positions_for_sync() → list of {"symbol", "qty", "avg_price"}
-# gw.resolve_contract(sym)    → qualified Contract (cached)
-# gw.place_order(contract, action, abs(qty))  → flatten trade
+# broker.get_positions_for_sync() → list of {"symbol", "qty", "avg_price"}
+# broker.resolve_contract(sym)    → qualified Contract (cached)
+# broker.place_order(contract, action, abs(qty))  → flatten trade
 #
-# Finally gw.disconnect() cleanly closes the IB TCP connection and stops
+# Finally broker.disconnect() cleanly closes the IB TCP connection and stops
 # the ib_async event loop.
 # ──────────────────────────────────────────────────────────────────────────────
 
 def step8_close_and_disconnect(
-    gw,
+    broker,
     settings: Settings,
     perf: PerformanceTracker,
 ) -> None:
     banner("STEP 8 — Close positions & disconnect")
 
     if settings.close_on_exit:
-        positions = gw.get_positions_for_sync()
+        positions = broker.get_positions_for_sync()
         if positions:
             log_step(f"Closing {len(positions)} open position(s) before disconnect…")
             for p in positions:
                 sym, qty = p["symbol"], int(p["qty"])
                 if qty == 0:
                     continue
-                contract = gw.resolve_contract(sym)
+                contract = broker.resolve_contract(sym)
                 if contract is None:
                     logger.error(f"  Cannot resolve {sym} — manual close required")
                     continue
                 action = "SELL" if qty > 0 else "BUY"
-                gw.place_order(contract, action, abs(qty))
+                broker.place_order(contract, action, abs(qty))
                 logger.info(f"  Closed {'LONG' if qty > 0 else 'SHORT'} {abs(qty)}x {sym}")
         else:
             log_step("No open positions — nothing to close")
@@ -558,7 +558,7 @@ def step8_close_and_disconnect(
         logger.info(f"  {perf.summary()}")
     logger.info("=" * 60)
 
-    gw.disconnect()
+    broker.disconnect()
     log_step("Disconnected from IB Gateway — goodbye!")
 
 
@@ -604,7 +604,7 @@ def main() -> None:
     settings = step1_load_config()
 
     # ── Step 2: connect to IB ────────────────────────────────────────────────
-    gw = step2_connect_ibkr(settings)
+    broker = step2_connect_ibkr(settings)
 
     # ── Step 3: explore QuantumSignals models ─────────────────────────────────
     step3_explore_quantum_signals(settings)
@@ -615,15 +615,15 @@ def main() -> None:
     step4_start_signal_stream(settings, stop_event, signal_queue)
 
     # ── Step 5: pre-resolve contracts for the symbols we will trade ───────────
-    resolved_contracts = step5_resolve_contracts(gw, settings)
+    resolved_contracts = step5_resolve_contracts(broker, settings)
 
     # ── Step 6: check existing broker positions ───────────────────────────────
-    step6_inspect_positions(gw)
+    step6_inspect_positions(broker)
 
     # ── Step 7: run the main event loop ───────────────────────────────────────
     perf = PerformanceTracker()
     step7_run_event_loop(
-        gw,
+        broker,
         settings,
         stop_event,
         signal_queue,
@@ -634,7 +634,7 @@ def main() -> None:
     )
 
     # ── Step 8: close positions and disconnect ────────────────────────────────
-    step8_close_and_disconnect(gw, settings, perf)
+    step8_close_and_disconnect(broker, settings, perf)
 
 
 if __name__ == "__main__":

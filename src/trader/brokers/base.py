@@ -9,11 +9,11 @@ from typing import Optional
 class OrderResult:
     """Broker-agnostic result of a ``place_order`` call.
 
-    Every gateway returns this shape so callers never inspect broker-native
-    objects. ``price`` is the actual fill price when known (the gateway extracts
+    Every broker returns this shape so callers never inspect broker-native
+    objects. ``price`` is the actual fill price when known (the broker extracts
     it from the underlying order/trade), or ``None`` if the order did not fill in
     time. ``raw`` holds the native result (an ``ib_async.Trade``, an Alpaca order
-    dict, etc.) as an escape hatch for gateway-specific follow-up.
+    dict, etc.) as an escape hatch for broker-specific follow-up.
     """
 
     id: str
@@ -41,10 +41,11 @@ def normalize_position_side(side: object, *, qty: float = 0.0) -> str:
     return "short" if "short" in label else "long"
 
 
-class GatewayBase(ABC):
+class BrokerBase(ABC):
     """Common interface for live and simulated brokers.
 
-    A gateway adapts one broker to the strategy layer. The strategy never
+    Each subclass wraps one broker's API — Alpaca, IBKR, or the simulator — and
+    exposes it to the strategy layer through this interface. The strategy never
     inspects broker-native objects: it calls ``resolve_contract`` to turn a
     QuantumSignals symbol into an opaque *contract*, then threads that contract
     back through ``get_last_price`` and ``place_order``. Implementers are free
@@ -71,13 +72,13 @@ class GatewayBase(ABC):
         on this broker** — the strategy treats ``None`` as "skip this symbol".
 
         Behaviour for symbols **not** in ``settings.symbol_map`` is
-        gateway-specific and intentionally so; document your choice:
-          - ``IBGateway`` returns ``None`` (unmapped symbols are skipped), and
+        broker-specific and intentionally so; document your choice:
+          - ``IBBroker`` returns ``None`` (unmapped symbols are skipped), and
             also returns ``None`` for a mapped symbol that fails to qualify.
-          - ``AlpacaGateway`` treats an unmapped symbol as a direct ticker, and
+          - ``AlpacaBroker`` treats an unmapped symbol as a direct ticker, and
             returns ``None`` for mapped non-equity (``secType != "STK"``) specs,
             since Alpaca trades equities/ETFs only.
-          - ``SimulatedGateway`` auto-creates a placeholder contract so DRY_RUN
+          - ``SimulatedBroker`` auto-creates a placeholder contract so DRY_RUN
             can exercise any symbol.
 
         Implementations may cache resolved contracts.
@@ -112,13 +113,13 @@ class GatewayBase(ABC):
             price: limit price. When ``None`` (or ``settings.use_market_orders``)
                 the order is placed at market.
             position_intent: ``"open"`` or ``"close"``, or ``None`` if the
-                broker does not need it. Gateways map this to broker-native
+                broker does not need it. Brokers map this to broker-native
                 intents (e.g. Alpaca's BUY_TO_OPEN / SELL_TO_CLOSE).
 
         Returns ``None`` when the order is rejected or otherwise not submitted —
         the strategy treats ``None`` as a failed leg and re-plans on the next
         interval. On success, ``OrderResult.price`` is the fill price when known
-        (the gateway extracts it from its native result) or ``None`` if the
+        (the broker extracts it from its native result) or ``None`` if the
         order had not filled before the poll timeout.
         """
         ...

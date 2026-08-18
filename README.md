@@ -251,7 +251,7 @@ rejected at order time.
 
 The bot has **three layers** of safety, applied in this order:
 
-1. **`DRY_RUN`** — simulated gateway (`SimulatedGateway`). No broker credentials
+1. **`DRY_RUN`** — simulated broker (`SimulatedBroker`). No broker credentials
    needed for order placement. Use this first to verify signal streaming and strategy
    logic locally.
 2. **`BROKER`** — choose Alpaca (REST, ETFs) or IBKR (futures + equities via
