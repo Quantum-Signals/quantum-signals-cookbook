@@ -32,8 +32,11 @@ def _install_default_request_timeout(rest_client: object, timeout: tuple[float, 
 class AlpacaGateway(GatewayBase):
     """Broker gateway backed by the Alpaca REST API (alpaca-py).
 
-    Supports equity / ETF trading only.  Futures symbols in the symbol map
-    (secType != "STK") are rejected with a warning from resolve_contract().
+    Supports equity / ETF trading only, so it owns its own symbol map:
+    QuantumSignals symbol → tradable Alpaca ticker. Futures signals (ES, NQ,
+    …) map to correlated ETFs; equity/ETF signals map to themselves.
+    ``settings.symbol_map`` overrides ``DEFAULT_SYMBOL_MAP`` when non-empty
+    (values are plain tickers).
 
     The ``contract`` object used throughout this gateway is a plain ticker
     string (e.g. ``"SPY"``), which is sufficient for all Alpaca REST calls.
@@ -41,8 +44,19 @@ class AlpacaGateway(GatewayBase):
     price already resolved.
     """
 
+    DEFAULT_SYMBOL_MAP: dict[str, str] = {
+        "ES": "SPY",
+        "NQ": "QQQ",
+        "S&P500": "SPY",
+        "Nasdaq100": "QQQ",
+        "SPY": "SPY",
+        "QQQ": "QQQ",
+        "AAPL": "AAPL",
+    }
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._symbol_map = settings.symbol_map or self.DEFAULT_SYMBOL_MAP
         self._trading_client: object = None
         self._data_client: object = None
 
@@ -83,29 +97,33 @@ class AlpacaGateway(GatewayBase):
     # ------------------------------------------------------------------
 
     def resolve_contract(self, qs_symbol: str) -> Optional[str]:
-        """Return the Alpaca ticker string for *qs_symbol*, or None.
+        """Return the tradable Alpaca ticker string for *qs_symbol*, or None.
 
-        Only STK entries in the symbol map are tradeable on Alpaca.
-        If the symbol is not in the map at all it is treated as a direct
-        Alpaca ticker (useful when positions are already held as ETF tickers).
+        Looks *qs_symbol* up in the symbol map (QS symbol → ticker). A symbol
+        not in the map is treated as a direct Alpaca ticker (useful when
+        positions are already held as ETF tickers). Returns ``None`` only if a
+        map override yields a non-equity spec, since Alpaca trades
+        equities/ETFs only.
         """
-        spec = self._settings.symbol_map.get(qs_symbol)
-        if spec is None:
+        entry = self._symbol_map.get(qs_symbol)
+        if entry is None:
             # Not in map — assume the caller already passed an Alpaca ticker.
             logger.debug(f"[Alpaca] '{qs_symbol}' not in symbol map — treating as direct ticker")
             return qs_symbol
 
-        sec_type = spec.get("secType", "STK")
-        if sec_type != "STK":
-            logger.warning(
-                f"[Alpaca] '{qs_symbol}' is secType={sec_type} — "
-                "Alpaca only supports equities/ETFs; skipping"
-            )
-            return None
+        # A plain ticker string is the native shape; a dict override (e.g. an
+        # IBKR-style spec) is tolerated by reading its symbol, but only STK.
+        if isinstance(entry, dict):
+            if entry.get("secType", "STK") != "STK":
+                logger.warning(
+                    f"[Alpaca] '{qs_symbol}' is secType={entry.get('secType')} — "
+                    "Alpaca only supports equities/ETFs; skipping"
+                )
+                return None
+            entry = entry["symbol"]
 
-        ticker = spec["symbol"]
-        logger.debug(f"[Alpaca] Resolved '{qs_symbol}' → '{ticker}'")
-        return ticker
+        logger.debug(f"[Alpaca] Resolved '{qs_symbol}' → '{entry}'")
+        return entry
 
     # ------------------------------------------------------------------
     # Market data

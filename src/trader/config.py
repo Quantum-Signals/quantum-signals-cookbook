@@ -8,27 +8,15 @@ from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 
-# Roll `lastTradeDateOrContractMonth` to the active front month or IB may fail/hang on qualify.
-_DEFAULT_SYMBOL_MAP: dict[str, dict] = {
-    "ES":   {"symbol": "ES",   "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "NQ":   {"symbol": "NQ",   "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "YM":   {"symbol": "YM",   "secType": "FUT", "exchange": "CBOT",  "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "RTY":  {"symbol": "RTY",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "CL":   {"symbol": "CL",   "secType": "FUT", "exchange": "NYMEX", "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "GC":   {"symbol": "GC",   "secType": "FUT", "exchange": "COMEX", "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "MES":  {"symbol": "MES",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "MNQ":  {"symbol": "MNQ",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "AAPL": {"symbol": "AAPL", "secType": "STK", "exchange": "SMART", "currency": "USD"},
-    "SPY":  {"symbol": "SPY",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
-    "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
-}
+# Symbol → broker-native contract mapping now lives with each gateway that owns
+# it (each broker encodes symbols differently): see AlpacaGateway.DEFAULT_SYMBOL_MAP
+# (QS → ETF ticker), IBGateway.DEFAULT_SYMBOL_MAP (QS → futures/stock spec), and
+# SimulatedGateway.DEFAULT_SYMBOL_MAP / DEFAULT_PRICES. Settings.symbol_map and
+# Settings.sim_prices below stay as optional overrides (empty = use the gateway's
+# own default). Contract multipliers are broker-neutral PnL math and stay here.
 
-_DEFAULT_SIM_PRICES: dict[str, float] = {
-    "ES": 5450.00, "NQ": 19200.00, "YM": 42500.00, "RTY": 2050.00,
-    "MES": 5450.00, "MNQ": 19200.00,
-    "CL": 68.50, "GC": 2350.00, "AAPL": 218.50, "SPY": 545.00, "QQQ": 470.00,
-}
-
+# Point-value per contract, used for end-of-day PnL in app.py. Futures carry a
+# contract multiplier; equities/ETFs are 1:1.
 _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
     "ES": 50.0, "NQ": 20.0, "YM": 5.0, "RTY": 50.0,
     "MES": 5.0, "MNQ": 2.0,
@@ -74,8 +62,10 @@ class Settings:
     #   1 = single-day mode (legacy behaviour: exit after first EOD).
     #   N = exit after N EODs.
     run_days: int = 0
-    symbol_map: dict[str, dict] = field(default_factory=lambda: dict(_DEFAULT_SYMBOL_MAP))
-    sim_prices: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_SIM_PRICES))
+    # Optional overrides for a gateway's own symbol map / sim prices.
+    # Empty (the default) means "use the gateway's DEFAULT_SYMBOL_MAP / DEFAULT_PRICES".
+    symbol_map: dict[str, dict] = field(default_factory=dict)
+    sim_prices: dict[str, float] = field(default_factory=dict)
     contract_multipliers: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_CONTRACT_MULTIPLIERS))
 
 

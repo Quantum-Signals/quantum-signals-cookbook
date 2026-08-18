@@ -23,11 +23,37 @@ class SimulatedGateway(GatewayBase):
     """
     In-memory broker that logs trades without connecting to anything.
     Prices jitter around configured sim prices so the PnL logic gets exercised.
+
+    Owns its own symbol map (contract shapes) and seed prices; both fall back
+    to the class defaults when ``settings.symbol_map`` / ``settings.sim_prices``
+    are empty. Any symbol not in the map is auto-created so DRY_RUN can exercise
+    arbitrary symbols.
     """
+
+    DEFAULT_SYMBOL_MAP: dict[str, dict] = {
+        "ES":   {"symbol": "ES",   "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "NQ":   {"symbol": "NQ",   "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "YM":   {"symbol": "YM",   "secType": "FUT", "exchange": "CBOT",  "currency": "USD"},
+        "RTY":  {"symbol": "RTY",  "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "CL":   {"symbol": "CL",   "secType": "FUT", "exchange": "NYMEX", "currency": "USD"},
+        "GC":   {"symbol": "GC",   "secType": "FUT", "exchange": "COMEX", "currency": "USD"},
+        "MES":  {"symbol": "MES",  "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "MNQ":  {"symbol": "MNQ",  "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "AAPL": {"symbol": "AAPL", "secType": "STK", "exchange": "SMART", "currency": "USD"},
+        "SPY":  {"symbol": "SPY",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
+        "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
+    }
+
+    DEFAULT_PRICES: dict[str, float] = {
+        "ES": 5450.00, "NQ": 19200.00, "YM": 42500.00, "RTY": 2050.00,
+        "MES": 5450.00, "MNQ": 19200.00,
+        "CL": 68.50, "GC": 2350.00, "AAPL": 218.50, "SPY": 545.00, "QQQ": 470.00,
+    }
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._prices: dict[str, float] = dict(settings.sim_prices)
+        self._symbol_map = settings.symbol_map or self.DEFAULT_SYMBOL_MAP
+        self._prices: dict[str, float] = dict(settings.sim_prices or self.DEFAULT_PRICES)
         self._orders: list[dict] = []
         self._sim_positions: dict[str, dict] = {}
         self._sim_account = {
@@ -44,7 +70,7 @@ class SimulatedGateway(GatewayBase):
         logger.info("[SIM] Simulated gateway disconnected")
 
     def resolve_contract(self, qs_symbol: str) -> Optional[SimContract]:
-        spec = self._settings.symbol_map.get(qs_symbol)
+        spec = self._symbol_map.get(qs_symbol)
         if spec is None:
             logger.info(f"[SIM] Symbol '{qs_symbol}' not in symbol map — auto-creating simulated contract")
             return SimContract(symbol=qs_symbol, sec_type="FUT", exchange="SIM", currency="USD")

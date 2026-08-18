@@ -278,14 +278,15 @@ def step4_start_signal_stream(
 # ══════════════════════════════════════════════════════════════════════════════
 #
 # Before placing any order IB needs a fully qualified Contract object.
-# gw.resolve_contract(symbol) looks up the symbol in settings.symbol_map,
+# gw.resolve_contract(symbol) looks up the symbol in the gateway's own symbol
+# map (IBGateway.DEFAULT_SYMBOL_MAP, overridable via settings.symbol_map),
 # constructs an ib_async.Contract, then calls ib.qualifyContracts() to fill
 # in the conId (IB's unique contract identifier).
 #
 # Results are cached — the first call per symbol does a round-trip to IB;
 # subsequent calls are instant.
 #
-# settings.symbol_map defaults support:
+# IBGateway.DEFAULT_SYMBOL_MAP supports:
 #   Futures : ES, NQ, YM, RTY, CL, GC, MES, MNQ  (CME/CBOT/NYMEX/COMEX)
 #   Equities: AAPL, SPY, QQQ  (SMART exchange)
 # ──────────────────────────────────────────────────────────────────────────────

@@ -12,12 +12,33 @@ from trader.gateways.base import GatewayBase, OrderResult
 
 
 class IBGateway(GatewayBase):
-    """Thin, synchronous wrapper around ib_async for order management."""
+    """Thin, synchronous wrapper around ib_async for order management.
+
+    Owns its own symbol map: QuantumSignals symbol → IBKR contract spec
+    (native futures + equities). ``settings.symbol_map`` overrides it when
+    non-empty. Roll ``lastTradeDateOrContractMonth`` to the active front month
+    or IB may fail/hang on qualify.
+    """
+
+    DEFAULT_SYMBOL_MAP: dict[str, dict] = {
+        "ES":   {"symbol": "ES",   "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+        "NQ":   {"symbol": "NQ",   "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+        "YM":   {"symbol": "YM",   "secType": "FUT", "exchange": "CBOT",  "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+        "RTY":  {"symbol": "RTY",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+        "CL":   {"symbol": "CL",   "secType": "FUT", "exchange": "NYMEX", "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+        "GC":   {"symbol": "GC",   "secType": "FUT", "exchange": "COMEX", "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+        "MES":  {"symbol": "MES",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+        "MNQ":  {"symbol": "MNQ",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
+        "AAPL": {"symbol": "AAPL", "secType": "STK", "exchange": "SMART", "currency": "USD"},
+        "SPY":  {"symbol": "SPY",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
+        "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
+    }
 
     def __init__(self, settings: Settings) -> None:
         from ib_async import IB
 
         self._settings = settings
+        self._symbol_map = settings.symbol_map or self.DEFAULT_SYMBOL_MAP
         self.ib = IB()
         self._contract_cache: dict[str, object] = {}
         # Set when IBKR reports a competing live session (error 10197); cleared
@@ -71,7 +92,7 @@ class IBGateway(GatewayBase):
         if qs_symbol in self._contract_cache:
             return self._contract_cache[qs_symbol]
 
-        spec = self._settings.symbol_map.get(qs_symbol)
+        spec = self._symbol_map.get(qs_symbol)
         if spec is None:
             logger.warning(f"Symbol '{qs_symbol}' not in symbol map — skipping")
             return None
