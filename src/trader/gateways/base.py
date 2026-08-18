@@ -42,7 +42,19 @@ def normalize_position_side(side: object, *, qty: float = 0.0) -> str:
 
 
 class GatewayBase(ABC):
-    """Common interface for live and simulated brokers."""
+    """Common interface for live and simulated brokers.
+
+    A gateway adapts one broker to the strategy layer. The strategy never
+    inspects broker-native objects: it calls ``resolve_contract`` to turn a
+    QuantumSignals symbol into an opaque *contract*, then threads that contract
+    back through ``get_last_price`` and ``place_order``. Implementers are free
+    to make ``contract`` whatever their broker needs (a ticker string, an
+    ``ib_async.Contract``, a dataclass); callers only pass it around.
+
+    To add a broker, subclass this and implement all abstract methods. Follow
+    the per-method contracts below — especially the ``None`` conventions, which
+    the strategy layer relies on to skip untradable symbols and failed orders.
+    """
 
     @abstractmethod
     def connect(self) -> None: ...
@@ -51,10 +63,36 @@ class GatewayBase(ABC):
     def disconnect(self) -> None: ...
 
     @abstractmethod
-    def resolve_contract(self, qs_symbol: str) -> Optional[object]: ...
+    def resolve_contract(self, qs_symbol: str) -> Optional[object]:
+        """Resolve a QuantumSignals symbol to an opaque broker contract.
+
+        Returns an object the strategy passes back to ``get_last_price`` and
+        ``place_order`` untouched, or ``None`` when the symbol is **not tradable
+        on this broker** — the strategy treats ``None`` as "skip this symbol".
+
+        Behaviour for symbols **not** in ``settings.symbol_map`` is
+        gateway-specific and intentionally so; document your choice:
+          - ``IBGateway`` returns ``None`` (unmapped symbols are skipped), and
+            also returns ``None`` for a mapped symbol that fails to qualify.
+          - ``AlpacaGateway`` treats an unmapped symbol as a direct ticker, and
+            returns ``None`` for mapped non-equity (``secType != "STK"``) specs,
+            since Alpaca trades equities/ETFs only.
+          - ``SimulatedGateway`` auto-creates a placeholder contract so DRY_RUN
+            can exercise any symbol.
+
+        Implementations may cache resolved contracts.
+        """
+        ...
 
     @abstractmethod
-    def get_last_price(self, contract: object) -> Optional[float]: ...
+    def get_last_price(self, contract: object) -> Optional[float]:
+        """Latest/last-trade price for *contract*, or ``None`` if unavailable.
+
+        *contract* is whatever ``resolve_contract`` returned. Return ``None``
+        (rather than raising) on transient data errors so callers can fall back;
+        connection-level failures may raise for the caller's retry logic.
+        """
+        ...
 
     @abstractmethod
     def place_order(
@@ -64,7 +102,26 @@ class GatewayBase(ABC):
         qty: int,
         price: Optional[float] = None,
         position_intent: Optional[str] = None,
-    ) -> Optional[OrderResult]: ...
+    ) -> Optional[OrderResult]:
+        """Submit an order and return an :class:`OrderResult`, or ``None``.
+
+        Args:
+            contract: the opaque object from ``resolve_contract``.
+            action: ``"BUY"`` or ``"SELL"`` (case-insensitive).
+            qty: order quantity; may be fractional where the broker allows it.
+            price: limit price. When ``None`` (or ``settings.use_market_orders``)
+                the order is placed at market.
+            position_intent: ``"open"`` or ``"close"``, or ``None`` if the
+                broker does not need it. Gateways map this to broker-native
+                intents (e.g. Alpaca's BUY_TO_OPEN / SELL_TO_CLOSE).
+
+        Returns ``None`` when the order is rejected or otherwise not submitted —
+        the strategy treats ``None`` as a failed leg and re-plans on the next
+        interval. On success, ``OrderResult.price`` is the fill price when known
+        (the gateway extracts it from its native result) or ``None`` if the
+        order had not filled before the poll timeout.
+        """
+        ...
 
     @abstractmethod
     def get_account_summary(self) -> dict: ...
