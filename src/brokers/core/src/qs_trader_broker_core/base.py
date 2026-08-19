@@ -12,8 +12,8 @@ class OrderResult:
     Every broker returns this shape so callers never inspect broker-native
     objects. ``price`` is the actual fill price when known (the broker extracts
     it from the underlying order/trade), or ``None`` if the order did not fill in
-    time. ``raw`` holds the native result (an ``ib_async.Trade``, an Alpaca order
-    dict, etc.) as an escape hatch for broker-specific follow-up.
+    time. ``raw`` holds the native result (e.g. an Alpaca order dict) as an
+    escape hatch for broker-specific follow-up.
     """
 
     id: str
@@ -44,19 +44,19 @@ def normalize_position_side(side: object, *, qty: float = 0.0) -> str:
 class BrokerBase(ABC):
     """Common interface for live and simulated brokers.
 
-    Each subclass wraps one broker's API — Alpaca, IBKR, or the simulator — and
+    Each subclass wraps one broker's API (e.g. Alpaca) or the simulator, and
     exposes it to the strategy layer through this interface. The strategy never
     inspects broker-native objects: it calls ``resolve_contract`` to turn a
     QuantumSignals symbol into an opaque *contract*, then threads that contract
     back through ``get_last_price`` and ``place_order``. Implementers are free
-    to make ``contract`` whatever their broker needs (a ticker string, an
-    ``ib_async.Contract``, a dataclass); callers only pass it around.
+    to make ``contract`` whatever their broker needs (a ticker string, a
+    broker-native contract object, a dataclass); callers only pass it around.
 
     A broker owns its own configuration: its ``__init__`` self-loads settings
     from the environment (e.g. a ``pydantic_settings.BaseSettings`` reading
-    ``ALPACA_*`` / ``IB_*``), so ``create_broker`` constructs it with no
-    arguments and the app passes it nothing. Accept an optional pre-built
-    settings object for test injection.
+    ``ALPACA_*``), so ``create_broker`` constructs it with no arguments and the
+    app passes it nothing. Accept an optional pre-built settings object for test
+    injection.
 
     To add a broker, subclass this and implement all abstract methods. Follow
     the per-method contracts below — especially the ``None`` conventions, which
@@ -77,15 +77,15 @@ class BrokerBase(ABC):
         ``place_order`` untouched, or ``None`` when the symbol is **not tradable
         on this broker** — the strategy treats ``None`` as "skip this symbol".
 
-        Behaviour for symbols **not** in ``settings.symbol_map`` is
+        Behaviour for symbols **not** in the broker's symbol map is
         broker-specific and intentionally so; document your choice:
-          - ``IBBroker`` returns ``None`` (unmapped symbols are skipped), and
-            also returns ``None`` for a mapped symbol that fails to qualify.
           - ``AlpacaBroker`` treats an unmapped symbol as a direct ticker, and
             returns ``None`` for mapped non-equity (``secType != "STK"``) specs,
             since Alpaca trades equities/ETFs only.
           - ``SimulatedBroker`` auto-creates a placeholder contract so DRY_RUN
             can exercise any symbol.
+          - A broker with a fixed instrument set may return ``None`` for any
+            symbol not in its map.
 
         Implementations may cache resolved contracts.
         """

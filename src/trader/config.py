@@ -12,8 +12,8 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Symbol → broker-native contract mapping lives with each broker that owns it
 # (each broker encodes symbols differently): see AlpacaBroker.DEFAULT_SYMBOL_MAP
-# (QS → ETF ticker), IBBroker.DEFAULT_SYMBOL_MAP (QS → futures/stock spec), and
-# SimulatedBroker.DEFAULT_SYMBOL_MAP / DEFAULT_PRICES. Contract multipliers are
+# (QS → ETF ticker) and SimulatedBroker.DEFAULT_SYMBOL_MAP / DEFAULT_PRICES.
+# Contract multipliers are
 # broker-neutral PnL math (used by the app's EOD flatten) and stay here.
 
 # Point-value per contract, used for end-of-day PnL in app.py. Futures carry a
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     Broker connection settings and credentials are **not** here — each broker
     package owns and self-loads its own config from its own namespaced env vars
-    (``ALPACA_*``, ``IB_*``). This object only decides *which* broker to run
+    (e.g. ``ALPACA_*``). This object only decides *which* broker to run
     (``dry_run`` / ``broker``) and drives the session/strategy layer.
 
     Env var names carry a ``TRADER_`` prefix (e.g. ``TRADER_DRY_RUN``), except
@@ -49,8 +49,8 @@ class Settings(BaseSettings):
     # own env var. Required.
     qs_api_key: str = Field(validation_alias="QUANTUMSIGNALS_API_KEY")
     dry_run: bool = True
-    # Broker selection: "ibkr" or "alpaca" (default). The broker's own
-    # connection settings live in its package (e.g. AlpacaSettings / IBSettings).
+    # Broker selection: "alpaca" (default). The broker's own connection
+    # settings live in its package (e.g. AlpacaSettings).
     broker: str = "alpaca"
     max_stream_retries: int = 5
     strategy: str = "momentum"  # "momentum" or "signal_follower"

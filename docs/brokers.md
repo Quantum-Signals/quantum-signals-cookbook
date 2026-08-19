@@ -13,7 +13,6 @@ owning its broker SDK:
 |---------|--------|----------|---------|
 | `qs-trader-broker-core` | `qs_trader_broker_core` | `BrokerBase`, `OrderResult`, `SimulatedBroker` | — |
 | `qs-trader-broker-alpaca` | `qs_trader_broker_alpaca` | `AlpacaBroker`, `AlpacaSettings` (`ALPACA_*`) | `alpaca-py` |
-| `qs-trader-broker-ibkr` | `qs_trader_broker_ibkr` | `IBBroker`, `IBSettings` (`IB_*`) | `ib-async` |
 
 ## Discovery & selection
 
@@ -33,7 +32,6 @@ one:
 ```
 TRADER_DRY_RUN=true    → simulated broker (SimulatedBroker, in core)
 TRADER_BROKER=alpaca   → AlpacaBroker   (REST, ETFs, fractional longs)
-TRADER_BROKER=ibkr     → IBBroker       (ib_async, futures + stocks)
 ```
 
 Installing a package that registers a broker under this group makes it
@@ -52,8 +50,8 @@ run (`TRADER_DRY_RUN` / `TRADER_BROKER`).
 
 ```
 trader (app) ──→ qs-trader-broker-core ←── qs-trader-broker-alpaca
-     │                                  ←── qs-trader-broker-ibkr
-     └──→ alpaca / ibkr packages (default install; drop one for a slimmer build)
+     │
+     └──→ alpaca package (default install)
 ```
 
 ## The `BrokerBase` interface
@@ -71,9 +69,9 @@ contracts and `None` conventions):
 | `get_account_summary() -> dict` | NLV, PnL, buying power |
 | `get_open_positions()` / `get_positions_for_sync() -> list[dict]` | Positions (the latter with signed qty) |
 
-`contract` is opaque — whatever the broker needs (a ticker string, an
-`ib_async.Contract`, a dataclass). The strategy layer never inspects it; it only
-threads it back through `get_last_price` / `place_order`. `place_order` always
+`contract` is opaque — whatever the broker needs (a ticker string, a
+broker-native contract object, a dataclass). The strategy layer never inspects
+it; it only threads it back through `get_last_price` / `place_order`. `place_order` always
 returns an `OrderResult` (with the fill price resolved by the broker), so callers
 never touch broker-native objects.
 
@@ -85,7 +83,6 @@ to see how it maps QS symbols:
 | Map | Location | Purpose |
 |-----|----------|---------|
 | `AlpacaBroker.DEFAULT_SYMBOL_MAP` | `qs_trader_broker_alpaca` | QS symbol → tradable ETF/stock ticker |
-| `IBBroker.DEFAULT_SYMBOL_MAP` | `qs_trader_broker_ibkr` | QS symbol → IB contract spec (**roll `lastTradeDateOrContractMonth`**) |
 | `SimulatedBroker.DEFAULT_SYMBOL_MAP` / `.DEFAULT_PRICES` | `qs_trader_broker_core` | Dry-run contract shapes & price seeds |
 
 Each broker accepts an optional `symbol_map` (and the simulator, `sim_prices`)

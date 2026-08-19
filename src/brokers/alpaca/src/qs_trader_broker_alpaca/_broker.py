@@ -124,8 +124,8 @@ class AlpacaBroker(BrokerBase):
             logger.debug(f"[Alpaca] '{qs_symbol}' not in symbol map — treating as direct ticker")
             return qs_symbol
 
-        # A plain ticker string is the native shape; a dict override (e.g. an
-        # IBKR-style spec) is tolerated by reading its symbol, but only STK.
+        # A plain ticker string is the native shape; a dict-shaped override
+        # (a full contract spec) is tolerated by reading its symbol, but only STK.
         if isinstance(entry, dict):
             if entry.get("secType", "STK") != "STK":
                 logger.warning(

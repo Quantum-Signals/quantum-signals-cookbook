@@ -10,7 +10,7 @@ from trader.config import Settings
 __all__ = ["BrokerBase", "discover_brokers", "create_broker"]
 
 # Entry-point group under which broker packages advertise their BrokerBase
-# subclass. Built-in brokers (alpaca, ibkr, simulated) register here in this
+# subclass. Built-in brokers (alpaca, simulated) register here in this
 # package's pyproject.toml; a third-party package can register its own broker
 # under the same group and it becomes selectable via BROKER=<name> with no
 # change to this module. Discovery uses Python's native entry-point mechanism.
@@ -35,8 +35,8 @@ def create_broker(settings: Settings) -> BrokerBase:
 
     ``settings`` is used **only** to choose which broker (``dry_run`` /
     ``broker``); the app passes no configuration into the broker itself. Each
-    broker self-loads its own settings from the environment (``ALPACA_*`` /
-    ``IB_*``), so the factory constructs it with no arguments.
+    broker self-loads its own settings from the environment (e.g. ``ALPACA_*``),
+    so the factory constructs it with no arguments.
 
     ``dry_run=True`` always wins → the ``simulated`` broker. Otherwise the
     ``broker`` setting selects a broker discovered from the ``qs_trader_brokers``

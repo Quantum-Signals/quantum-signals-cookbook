@@ -53,8 +53,8 @@ def _compute_order_qty(
 
     With a 5-min interval there are 78 executions/day.  At price $545 (SPY)
     and a $50k per-symbol budget:
-      fractional (Alpaca): qty = 50_000 / (78 × 545) ≈ 1.1776 shares
-      integer    (IBKR):   qty = round(1.1776) = 1 share
+      fractional:   qty = 50_000 / (78 × 545) ≈ 1.1776 shares
+      whole-share:  qty = round(1.1776) = 1 share
 
     Doubling the interval halves executions/day and doubles qty, keeping
     daily notional constant.
@@ -153,7 +153,7 @@ class MomentumStrategy(StrategyBase):
             f"symbols={n_symbols}  "
             f"target_per_symbol=${self._target_daily_notional_per_symbol:,.0f}  "
             f"total_target=${settings.daily_start_capital:,.0f}  "
-            f"fractional={'yes (Alpaca)' if self._use_fractional else 'no (integer)'}"
+            f"fractional={'yes' if self._use_fractional else 'no (whole-share)'}"
         )
 
     # ------------------------------------------------------------------

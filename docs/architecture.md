@@ -28,7 +28,7 @@ A long-running Python process that:
 
 1. Streams minute-level ML signals from QuantumSignals (SSE)
 2. Applies a pluggable strategy (`momentum` or `signal_follower`)
-3. Places orders at Alpaca, IBKR, or a simulated broker (`TRADER_DRY_RUN`)
+3. Places orders through the selected broker (e.g. Alpaca) or a simulated broker (`TRADER_DRY_RUN`)
 4. Flattens positions at session end and logs daily / run summaries
 
 ### Document map
@@ -42,7 +42,7 @@ A long-running Python process that:
 
 ### Tech stack
 
-Python 3.12+, `uv` (workspace), `loguru`, `python-dotenv`, `pydantic-settings`, `quantumsignals-client` (≥ 0.6.0), `alpaca-py`, `ib-async`, `pytest`.
+Python 3.12+, `uv` (workspace), `loguru`, `python-dotenv`, `pydantic-settings`, `quantumsignals-client` (≥ 0.6.0), `alpaca-py`, `pytest`. (Broker SDKs live in their broker packages.)
 
 ---
 
@@ -106,7 +106,7 @@ Order of operations in [`src/trader/app.py`](src/trader/app.py):
 
 ### Threading model
 
-**Critical:** [`streaming.py`](src/trader/streaming.py) runs QS I/O in a daemon thread and only enqueues signal objects. The **main thread** must execute all `ib_async` / broker / strategy calls because IBKR was connected on the main thread.
+**Critical:** [`streaming.py`](src/trader/streaming.py) runs QS I/O in a daemon thread and only enqueues signal objects. The **main thread** executes all broker / strategy calls — a broker SDK may require thread affinity (bound to the event loop of the thread that connected it).
 
 ```
 QS stream thread  →  signal_queue  →  main thread (strategy + broker)
@@ -168,10 +168,9 @@ live-trader/                # uv workspace root (the app)
 │   └── strategy/           # momentum, signal_follower
 ├── src/brokers/            # broker packages (uv workspace members)
 │   ├── core/               # qs-trader-broker-core: BrokerBase, OrderResult, SimulatedBroker
-│   ├── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
-│   └── ibkr/               # qs-trader-broker-ibkr  (deps: ib-async)
+│   └── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
 ├── tests/
-└── scripts/                # tutorial, QS test, multiday sim
+└── scripts/                # QS smoke test, multiday sim
 ```
 
 ### Layer responsibilities
@@ -199,7 +198,6 @@ Broker-specific quirks worth knowing here:
 | Class | Notes |
 |-------|-------|
 | `AlpacaBroker` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
-| `IBBroker` | Qualifies futures from its symbol map; error 10197 = competing session |
 | `SimulatedBroker` | Jittered seed prices (`SIM_PRICE_JITTER`, `0` = deterministic); no external broker |
 
 ### Strategies (`src/trader/strategy/`)
@@ -216,9 +214,8 @@ Register new strategies in `app._STRATEGIES`.
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/test_qs_connection.py` | Validate API key; print signal stream |
-| `scripts/test_multiday_sim.py` | Offline multi-day supervisor (stubbed QS, sim clock) |
-| `scripts/tutorial.py` | Interactive IBKR + QS walkthrough |
+| `scripts/smoke_qs_connection.py` | Validate API key; print signal stream |
+| `scripts/smoke_multiday_supervisor.py` | Offline multi-day supervisor (stubbed QS, sim clock) |
 
 ---
 
@@ -240,14 +237,14 @@ QuantumSignals emits objects consumed by `handle_signal(signal)`.
 
 **Symbol mapping** (QS signal → tradable instrument):
 
-| QS `signal.symbol` | Alpaca (ETF) | IBKR (native) | Strategies |
-|--------------------|--------------|---------------|------------|
-| ES, S&P500 | SPY | ES futures | momentum, signal_follower |
-| NQ, Nasdaq100 | QQQ | NQ futures | momentum, signal_follower |
-| SPY | SPY | SPY stock | momentum only |
-| QQQ | QQQ | QQQ stock | momentum only |
+| QS `signal.symbol` | Alpaca (ETF) | Strategies |
+|--------------------|--------------|------------|
+| ES, S&P500 | SPY | momentum, signal_follower |
+| NQ, Nasdaq100 | QQQ | momentum, signal_follower |
+| SPY | SPY | momentum only |
+| QQQ | QQQ | momentum only |
 
-Defined in `_SIGNAL_TO_TRADE` in each strategy module (`momentum.py` includes `SPY`/`QQQ`; `signal_follower.py` does not). IBKR can also trade symbols listed in `config._DEFAULT_SYMBOL_MAP` (YM, RTY, MES, MNQ, CL, GC, AAPL) when signals exist and the symbol is allowed.
+Defined in `_SIGNAL_TO_TRADE` in each strategy module (`momentum.py` includes `SPY`/`QQQ`; `signal_follower.py` does not). A broker maps QS symbols to whatever it trades via its own `DEFAULT_SYMBOL_MAP` (see [brokers.md § Symbol maps](brokers.md#symbol-maps)).
 
 Set `TRADER_ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100`), not the ETF ticker.
 
@@ -281,7 +278,7 @@ target_daily_notional_per_symbol = TRADER_DAILY_START_CAPITAL / n_active_symbols
 | Broker | `use_fractional` | Order qty |
 |--------|------------------|-----------|
 | Alpaca | `true` | `round(raw, 4)` shares |
-| IBKR / sim | `false` | `max(1, round(raw))` whole shares |
+| non-fractional / sim | `false` | `max(1, round(raw))` whole shares |
 
 Doubling `TRADER_EXECUTION_INTERVAL_MINUTES` halves `executions_per_day` and **doubles** `qty_per_slice`, keeping approximate daily notional stable.
 
@@ -300,7 +297,7 @@ Doubling `TRADER_EXECUTION_INTERVAL_MINUTES` halves `executions_per_day` and **d
 qty_per_slice = 50_000 / (78 × 545) ≈ 1.1776 shares  (Alpaca)
 ```
 
-On IBKR the same inputs yield `max(1, round(1.1776)) = 1` share per slice.
+On a whole-share broker the same inputs yield `max(1, round(1.1776)) = 1` share per slice.
 
 #### Per-interval behavior (`handle_signal`)
 
@@ -324,7 +321,7 @@ legs = _plan_legs(current, target, avail_close, use_fractional)
 
 **Feasible target** (`_snap_target`):
 
-| Case | Alpaca | IBKR |
+| Case | Alpaca (fractional) | Whole-share broker |
 |------|--------|------|
 | `ideal >= 0` | Hold fractional long exactly | `round(ideal)` whole shares |
 | `ideal < 0` | `round(ideal)` whole-share short; remainder → `_position_reserve` | `round(ideal)` whole shares |
@@ -470,13 +467,13 @@ Full operator reference (env vars, strategies, symbols, paper vs live): [README.
 | `TRADER_DAILY_START_CAPITAL` | Momentum per-symbol daily notional; summary return % for both strategies |
 | `TRADER_EXECUTION_INTERVAL_MINUTES` | Momentum execution gate; signal_follower decision grid |
 | `TRADER_ALLOWED_SYMBOLS` | Filters QS symbols (comma-separated QS names, e.g. `S&P500,Nasdaq100`) |
-| `TRADER_BROKER` | Alpaca fractional vs IBKR integer sizing (ignored when `TRADER_DRY_RUN=true`) |
+| `TRADER_BROKER` | Selects the broker; drives fractional vs whole-share sizing (ignored when `TRADER_DRY_RUN=true`) |
 | `TRADER_DRY_RUN` | Simulated broker — no real orders |
-| `ALPACA_PAPER` / `IB_PORT` | Paper vs live account when `TRADER_DRY_RUN=false` |
+| `ALPACA_PAPER` | Paper vs live account when `TRADER_DRY_RUN=false` |
 
 ### Paper vs live (summary)
 
-Three layers: `TRADER_DRY_RUN` (simulated) → `TRADER_BROKER` (Alpaca vs IBKR) → paper/live switch (`ALPACA_PAPER` or `IB_PORT`). See [README.md § Paper Trading vs Live Trading](README.md#paper-trading-vs-live-trading).
+Three layers: `TRADER_DRY_RUN` (simulated) → `TRADER_BROKER` (which broker) → the broker's own paper/live switch (e.g. `ALPACA_PAPER`). See [README.md § Paper Trading vs Live Trading](README.md#paper-trading-vs-live-trading).
 
 ### Symbol maps & code-only settings
 
@@ -525,7 +522,7 @@ TRADER_DRY_RUN=true uv run live-trader
 uv run live-trader --execution-interval 10
 ```
 
-See [README.md](README.md) for Alpaca paper, IBKR Gateway, and Docker.
+See [README.md](README.md) for Alpaca paper trading and Docker.
 
 ### Automated tests
 
@@ -546,12 +543,11 @@ No live broker or QS API in CI-style unit tests.
 ### Manual smoke tests
 
 ```bash
-uv run python scripts/test_qs_connection.py
-uv run python scripts/test_multiday_sim.py
-uv run python scripts/tutorial.py
+uv run python scripts/smoke_qs_connection.py
+uv run python scripts/smoke_multiday_supervisor.py --days 3
 ```
 
-`test_multiday_sim.py` stubs the QS thread and accelerates wall clock to verify multi-day logs and `TRADER_RUN_DAYS` exit in seconds.
+`smoke_multiday_supervisor.py` stubs the QS thread and accelerates wall clock to verify multi-day logs and `TRADER_RUN_DAYS` exit in seconds.
 
 ---
 
@@ -568,7 +564,7 @@ uv run python scripts/tutorial.py
 | Holidays | Not detected — bot wakes; often empty day |
 | Alpaca fractional shorts | Momentum reserve + close/open legs; do not remove without regression tests |
 | Alpaca hung HTTP | Default timeouts in `AlpacaBroker` |
-| IBKR threading | Never call broker from QS thread |
+| Broker thread affinity | Never call broker from QS thread |
 | IB error 10197 | Competing TWS/Gateway — close other sessions |
 | Position drift | Pre-session `sync_positions()` — broker is truth |
 | Futures roll | Update `lastTradeDateOrContractMonth` in `config.py` |

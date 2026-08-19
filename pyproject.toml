@@ -1,7 +1,7 @@
 [project]
 name = "live-trader"
 version = "0.1.0"
-description = "QuantumSignals algorithmic trading bot (IBKR + Alpaca)"
+description = "QuantumSignals algorithmic trading bot with pluggable brokers"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,11 +10,10 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "quantumsignals-client>=0.6.0",
     # Broker packages (workspace members). Each owns its own broker SDK
-    # (alpaca-py, ib-async) and registers a "qs_trader_brokers" entry point that
+    # (e.g. alpaca-py) and registers a "qs_trader_brokers" entry point that
     # trader.brokers.create_broker discovers at runtime.
     "qs-trader-broker-core",
     "qs-trader-broker-alpaca",
-    "qs-trader-broker-ibkr",
 ]
 
 [project.scripts]
@@ -33,7 +32,6 @@ members = ["src/brokers/*"]
 [tool.uv.sources]
 qs-trader-broker-core = { workspace = true }
 qs-trader-broker-alpaca = { workspace = true }
-qs-trader-broker-ibkr = { workspace = true }
 
 [dependency-groups]
 dev = [

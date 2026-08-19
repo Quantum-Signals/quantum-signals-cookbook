@@ -1,6 +1,6 @@
 # QuantumSignals Live Trader
 
-An algorithmic trading bot that streams real-time signals from [QuantumSignals](https://quantumsignals.io) and executes trades automatically through **Alpaca** or **Interactive Brokers**.
+An algorithmic trading bot that streams real-time signals from [QuantumSignals](https://quantumsignals.io) and executes trades automatically through a pluggable broker (**Alpaca** included).
 
 **Developer documentation:** [docs/architecture.md](docs/architecture.md) — architecture, module map, position-sizing logic, local development.
 
@@ -118,7 +118,7 @@ Alpaca credentials are required only when `TRADER_DRY_RUN=false` **and** `TRADER
 | Variable | Default | Description |
 |---|---|---|
 | `TRADER_DRY_RUN` | `true` | `true` = simulated broker — no real orders, no Alpaca/IB connection needed for trading |
-| `TRADER_BROKER` | `alpaca` | Broker to use: `alpaca` or `ibkr` (ignored when `TRADER_DRY_RUN=true`) |
+| `TRADER_BROKER` | `alpaca` | Broker to use (any installed broker; `alpaca` ships by default). Ignored when `TRADER_DRY_RUN=true` |
 | `ALPACA_PAPER` | `true` | `true` = Alpaca paper account, `false` = Alpaca live account (real money) |
 
 ### Strategy
@@ -165,23 +165,14 @@ Weekends are skipped automatically. US holidays are **not** detected — on a
 holiday the bot wakes up normally but the QS stream simply produces no
 actionable signals, so the day passes with an empty summary.
 
-### Interactive Brokers (optional — only if `TRADER_BROKER=ibkr`)
-
-| Variable | Default | Description |
-|---|---|---|
-| `IB_HOST` | `127.0.0.1` | Host running IB Gateway / TWS. Use `host.docker.internal` in Docker on Mac/Windows |
-| `IB_PORT` | `4002` | IB Gateway port (`4001` for TWS live, `4002` for paper) |
-| `IB_CLIENT_ID` | `1` | IB API client ID |
-| `IB_MARKET_DATA_TYPE` | `4` | `1` = live, `3` = delayed, `4` = delayed-frozen |
-
 ---
 
 ## Strategies
 
 Both strategies consume minute-level signals from QuantumSignals and place orders
 through the configured broker. On **Alpaca**, futures signal symbols are mapped to
-correlated ETFs (see [Supported Symbols](#supported-symbols)). On **IBKR**, native
-futures can be traded directly when listed in the symbol map.
+correlated ETFs (see [Supported Symbols](#supported-symbols)). Each broker maps QS
+symbols to whatever it trades via its own symbol map.
 
 ### `momentum` (default)
 
@@ -190,7 +181,7 @@ Incrementally builds a sized position on a fixed time grid (`TRADER_EXECUTION_IN
 - **When it trades:** at most **one execution per symbol per interval**, gated on the signal's own timestamp (not wall-clock arrival time).
 - **Order size:** each UP/DOWN slice is sized so daily notional ≈ `TRADER_DAILY_START_CAPITAL / n_active_symbols` (e.g. $100k across ES + NQ → ~$50k per symbol per day).
 - **Broker reconciliation:** every tick re-reads the broker position and plans close-then-open legs, so failed orders, partial fills, or manual trades self-heal on the next interval.
-- **Fractional shares:** enabled on Alpaca (fractional longs; whole-share shorts with a reserve for sub-share intent). IBKR uses whole shares.
+- **Fractional shares:** enabled on Alpaca (fractional longs; whole-share shorts with a reserve for sub-share intent). Whole-share brokers round each slice to whole shares.
 - **Signal symbols:** `ES`, `NQ`, `S&P500`, `Nasdaq100`, `SPY`, `QQQ` (QS client ≥ 0.6.0 may emit full names or ETF tickers directly).
 
 ### `signal_follower`
@@ -223,29 +214,20 @@ QuantumSignals may emit signals under **legacy futures tickers** (`ES`, `NQ`) or
 
 ### Signal → execution mapping
 
-| QS signal symbol | Alpaca (ETF) | IBKR (native) |
-|---|---|---|
-| `ES`, `S&P500` | SPY | ES futures |
-| `NQ`, `Nasdaq100` | QQQ | NQ futures |
-| `SPY` | SPY | SPY stock |
-| `QQQ` | QQQ | QQQ stock |
+| QS signal symbol | Alpaca (ETF) |
+|---|---|
+| `ES`, `S&P500` | SPY |
+| `NQ`, `Nasdaq100` | QQQ |
+| `SPY` | SPY |
+| `QQQ` | QQQ |
 
 Set `TRADER_ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100` or
 `ES,NQ`), not the ETF ticker.
 
-### IBKR-only symbols (no QS mapping — futures/stocks in symbol map)
-
-These can be traded on IBKR when signals exist and the symbol is allowed, but are
-not mapped to ETFs for Alpaca:
-
-| Category | Symbols |
-|---|---|
-| Index futures | YM, RTY, MES, MNQ |
-| Commodity futures | CL (crude oil), GC (gold) |
-| Stocks | AAPL |
-
-Alpaca supports **equities and ETFs only** — any futures entry in the symbol map is
-rejected at order time.
+Alpaca supports **equities and ETFs only** — futures signals are mapped to
+correlated ETFs, and any non-equity entry in the symbol map is rejected at order
+time. Other brokers define their own mappings; see
+[docs/brokers.md](docs/brokers.md).
 
 ---
 
@@ -256,8 +238,8 @@ The bot has **three layers** of safety, applied in this order:
 1. **`TRADER_DRY_RUN`** — simulated broker (`SimulatedBroker`). No broker credentials
    needed for order placement. Use this first to verify signal streaming and strategy
    logic locally.
-2. **`TRADER_BROKER`** — choose Alpaca (REST, ETFs) or IBKR (futures + equities via
-   Gateway/TWS). Ignored when `TRADER_DRY_RUN=true`.
+2. **`TRADER_BROKER`** — choose an installed broker (Alpaca ships by default:
+   REST, ETFs). Ignored when `TRADER_DRY_RUN=true`.
 3. **Paper vs live account** — broker-specific switch for real (but fake-money)
    vs real-money execution.
 
@@ -268,18 +250,6 @@ The bot has **three layers** of safety, applied in this order:
 | `true` | any | Simulated — no Alpaca connection for orders |
 | `false` | `true` | Real orders to Alpaca **paper** account |
 | `false` | `false` | Real orders to Alpaca **live** account — **real money** |
-
-### Interactive Brokers (`TRADER_BROKER=ibkr`)
-
-| `TRADER_DRY_RUN` | `IB_PORT` | Result |
-|---|---|---|
-| `true` | any | Simulated — no IB connection for orders |
-| `false` | `4002` (default) | Real orders via IB Gateway **paper** |
-| `false` | `4001` | Real orders via IB Gateway/TWS **live** — **real money** |
-
-On Docker Desktop (Mac/Windows), set `IB_HOST=host.docker.internal` so the container
-can reach IB Gateway on your host. On Linux, use your machine's LAN IP or
-`network_mode: host`.
 
 ### Recommended progression
 
