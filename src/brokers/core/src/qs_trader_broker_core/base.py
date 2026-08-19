@@ -52,6 +52,12 @@ class BrokerBase(ABC):
     to make ``contract`` whatever their broker needs (a ticker string, an
     ``ib_async.Contract``, a dataclass); callers only pass it around.
 
+    A broker owns its own configuration: its ``__init__`` self-loads settings
+    from the environment (e.g. a ``pydantic_settings.BaseSettings`` reading
+    ``ALPACA_*`` / ``IB_*``), so ``create_broker`` constructs it with no
+    arguments and the app passes it nothing. Accept an optional pre-built
+    settings object for test injection.
+
     To add a broker, subclass this and implement all abstract methods. Follow
     the per-method contracts below — especially the ``None`` conventions, which
     the strategy layer relies on to skip untradable symbols and failed orders.

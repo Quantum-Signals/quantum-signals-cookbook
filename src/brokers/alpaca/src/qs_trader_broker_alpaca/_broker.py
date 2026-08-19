@@ -8,10 +8,11 @@ from loguru import logger
 
 from qs_trader_broker_core import (
     BrokerBase,
-    BrokerSettings,
     OrderResult,
     normalize_position_side,
 )
+
+from qs_trader_broker_alpaca.settings import AlpacaSettings
 
 # Alpaca's RESTClient uses ``requests.Session`` without per-call timeouts, so a
 # stalled TCP connection can block the main trading loop forever (e.g. during
@@ -38,9 +39,12 @@ class AlpacaBroker(BrokerBase):
 
     Supports equity / ETF trading only, so it owns its own symbol map:
     QuantumSignals symbol → tradable Alpaca ticker. Futures signals (ES, NQ,
-    …) map to correlated ETFs; equity/ETF signals map to themselves.
-    ``settings.symbol_map`` overrides ``DEFAULT_SYMBOL_MAP`` when non-empty
+    …) map to correlated ETFs; equity/ETF signals map to themselves. Pass a
+    ``symbol_map`` override to the constructor to replace ``DEFAULT_SYMBOL_MAP``
     (values are plain tickers).
+
+    Configuration is loaded from ``ALPACA_*`` env vars via ``AlpacaSettings``;
+    the broker self-loads unless a settings object is injected.
 
     The ``contract`` object used throughout this broker is a plain ticker
     string (e.g. ``"SPY"``), which is sufficient for all Alpaca REST calls.
@@ -58,9 +62,14 @@ class AlpacaBroker(BrokerBase):
         "AAPL": "AAPL",
     }
 
-    def __init__(self, settings: BrokerSettings) -> None:
-        self._settings = settings
-        self._symbol_map = settings.symbol_map or self.DEFAULT_SYMBOL_MAP
+    def __init__(
+        self,
+        settings: Optional[AlpacaSettings] = None,
+        *,
+        symbol_map: Optional[dict[str, str]] = None,
+    ) -> None:
+        self._settings = settings if settings is not None else AlpacaSettings()
+        self._symbol_map = symbol_map or self.DEFAULT_SYMBOL_MAP
         self._trading_client: object = None
         self._data_client: object = None
 
@@ -73,19 +82,19 @@ class AlpacaBroker(BrokerBase):
         from alpaca.trading.client import TradingClient
 
         self._trading_client = TradingClient(
-            self._settings.alpaca_api_key,
-            self._settings.alpaca_secret_key,
-            paper=self._settings.alpaca_paper,
+            self._settings.api_key,
+            self._settings.secret_key,
+            paper=self._settings.paper,
         )
         self._data_client = StockHistoricalDataClient(
-            self._settings.alpaca_api_key,
-            self._settings.alpaca_secret_key,
+            self._settings.api_key,
+            self._settings.secret_key,
         )
         _install_default_request_timeout(self._trading_client, _DEFAULT_ALPACA_HTTP_TIMEOUT)
         _install_default_request_timeout(self._data_client, _DEFAULT_ALPACA_HTTP_TIMEOUT)
 
         account = self._trading_client.get_account()
-        mode = "PAPER" if self._settings.alpaca_paper else "LIVE"
+        mode = "PAPER" if self._settings.paper else "LIVE"
         logger.success(
             f"Connected to Alpaca ({mode})  "
             f"equity=${float(account.equity):,.2f}  "

@@ -1006,6 +1006,7 @@ source = { editable = "src/brokers/alpaca" }
 dependencies = [
     { name = "alpaca-py" },
     { name = "loguru" },
+    { name = "pydantic-settings" },
     { name = "qs-trader-broker-core" },
 ]
 
@@ -1013,6 +1014,7 @@ dependencies = [
 requires-dist = [
     { name = "alpaca-py", specifier = ">=0.29.0" },
     { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "qs-trader-broker-core", editable = "src/brokers/core" },
 ]
 
@@ -1022,10 +1024,14 @@ version = "0.1.0"
 source = { editable = "src/brokers/core" }
 dependencies = [
     { name = "loguru" },
+    { name = "pydantic-settings" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "loguru", specifier = ">=0.7.3" }]
+requires-dist = [
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pydantic-settings", specifier = ">=2.0" },
+]
 
 [[package]]
 name = "qs-trader-broker-ibkr"
@@ -1034,6 +1040,7 @@ source = { editable = "src/brokers/ibkr" }
 dependencies = [
     { name = "ib-async" },
     { name = "loguru" },
+    { name = "pydantic-settings" },
     { name = "qs-trader-broker-core" },
 ]
 
@@ -1041,6 +1048,7 @@ dependencies = [
 requires-dist = [
     { name = "ib-async", specifier = ">=2.0.0" },
     { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "qs-trader-broker-core", editable = "src/brokers/core" },
 ]
 

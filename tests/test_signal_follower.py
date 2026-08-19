@@ -36,7 +36,7 @@ def _make_strategy(**settings_kw):
     from datetime import date
 
     settings = _make_settings(**settings_kw)
-    broker = SimulatedBroker(settings)
+    broker = SimulatedBroker()
     broker.connect()
     perf = PerformanceTracker()
     strategy = SignalFollowerStrategy(broker, perf, settings)
@@ -325,7 +325,7 @@ class TestSignalFollowerSymbolFilter:
 class TestPreMarketCleanup:
     def test_sync_positions_closes_existing(self):
         settings = _make_settings()
-        broker = SimulatedBroker(settings)
+        broker = SimulatedBroker()
         broker.connect()
         contract = broker.resolve_contract("ES")
         broker.place_order(contract, "BUY", 3, 5450.0)
@@ -338,7 +338,7 @@ class TestPreMarketCleanup:
 
     def test_pre_market_cleanup_on_first_signal(self):
         settings = _make_settings()
-        broker = SimulatedBroker(settings)
+        broker = SimulatedBroker()
         broker.connect()
         contract = broker.resolve_contract("NQ")
         broker.place_order(contract, "SELL", 2, 19200.0)

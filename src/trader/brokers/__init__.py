@@ -31,13 +31,18 @@ def discover_brokers() -> dict[str, Callable[[Settings], BrokerBase]]:
 
 
 def create_broker(settings: Settings) -> BrokerBase:
-    """Factory: return the appropriate broker based on settings.
+    """Factory: select and construct the configured broker.
 
-    ``dry_run=True`` always wins → the ``simulated`` broker (no real broker
-    needed). Otherwise the ``broker`` setting selects a broker discovered from
-    the ``qs_trader_brokers`` entry-point group. An unknown broker raises
-    ValueError listing the brokers that are actually installed, so a typo in
-    ``BROKER`` — or a missing broker package — fails loudly at startup.
+    ``settings`` is used **only** to choose which broker (``dry_run`` /
+    ``broker``); the app passes no configuration into the broker itself. Each
+    broker self-loads its own settings from the environment (``ALPACA_*`` /
+    ``IB_*``), so the factory constructs it with no arguments.
+
+    ``dry_run=True`` always wins → the ``simulated`` broker. Otherwise the
+    ``broker`` setting selects a broker discovered from the ``qs_trader_brokers``
+    entry-point group. An unknown broker raises ValueError listing the brokers
+    that are actually installed, so a typo in ``BROKER`` — or a missing broker
+    package — fails loudly at startup.
     """
     registry = discover_brokers()
 
@@ -55,4 +60,4 @@ def create_broker(settings: Settings) -> BrokerBase:
             f"Unknown BROKER={settings.broker!r}. Installed brokers: {available}. "
             "Install the package that provides it, or check for a typo."
         ) from None
-    return factory(settings)
+    return factory()

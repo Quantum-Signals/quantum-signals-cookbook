@@ -8,7 +8,7 @@ from typing import Optional
 from loguru import logger
 
 from qs_trader_broker_core.base import BrokerBase, OrderResult
-from qs_trader_broker_core.settings import BrokerSettings
+from qs_trader_broker_core.settings import SimulatedSettings
 
 
 @dataclass
@@ -25,9 +25,9 @@ class SimulatedBroker(BrokerBase):
     Prices jitter around configured sim prices so the PnL logic gets exercised.
 
     Owns its own symbol map (contract shapes) and seed prices; both fall back
-    to the class defaults when ``settings.symbol_map`` / ``settings.sim_prices``
-    are empty. Any symbol not in the map is auto-created so DRY_RUN can exercise
-    arbitrary symbols.
+    to the class defaults when the ``symbol_map`` / ``sim_prices`` constructor
+    overrides are omitted. Any symbol not in the map is auto-created so DRY_RUN
+    can exercise arbitrary symbols.
     """
 
     DEFAULT_SYMBOL_MAP: dict[str, dict] = {
@@ -50,10 +50,17 @@ class SimulatedBroker(BrokerBase):
         "CL": 68.50, "GC": 2350.00, "AAPL": 218.50, "SPY": 545.00, "QQQ": 470.00,
     }
 
-    def __init__(self, settings: BrokerSettings) -> None:
-        self._settings = settings
-        self._symbol_map = settings.symbol_map or self.DEFAULT_SYMBOL_MAP
-        self._prices: dict[str, float] = dict(settings.sim_prices or self.DEFAULT_PRICES)
+    def __init__(
+        self,
+        settings: Optional[SimulatedSettings] = None,
+        *,
+        symbol_map: Optional[dict[str, dict]] = None,
+        sim_prices: Optional[dict[str, float]] = None,
+    ) -> None:
+        # Self-load env settings (SIM_*) when not injected.
+        self._settings = settings if settings is not None else SimulatedSettings()
+        self._symbol_map = symbol_map or self.DEFAULT_SYMBOL_MAP
+        self._prices: dict[str, float] = dict(sim_prices or self.DEFAULT_PRICES)
         self._orders: list[dict] = []
         self._sim_positions: dict[str, dict] = {}
         self._sim_account = {

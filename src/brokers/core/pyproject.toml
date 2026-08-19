@@ -1,10 +1,11 @@
 [project]
 name = "qs-trader-broker-core"
 version = "0.1.0"
-description = "Shared broker interface (BrokerBase, OrderResult, BrokerSettings) and the simulated broker for the QuantumSignals live trader"
+description = "Shared broker interface (BrokerBase, OrderResult) and the simulated broker for the QuantumSignals live trader"
 requires-python = ">=3.12"
 dependencies = [
     "loguru>=0.7.3",
+    "pydantic-settings>=2.0",
 ]
 
 # The always-available simulated broker registers itself the same way an

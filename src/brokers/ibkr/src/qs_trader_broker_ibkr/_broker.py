@@ -7,16 +7,22 @@ from typing import Optional
 
 from loguru import logger
 
-from qs_trader_broker_core import BrokerBase, BrokerSettings, OrderResult
+from qs_trader_broker_core import BrokerBase, OrderResult
+
+from qs_trader_broker_ibkr.settings import IBSettings
 
 
 class IBBroker(BrokerBase):
     """Thin, synchronous wrapper around ib_async for order management.
 
     Owns its own symbol map: QuantumSignals symbol → IBKR contract spec
-    (native futures + equities). ``settings.symbol_map`` overrides it when
-    non-empty. Roll ``lastTradeDateOrContractMonth`` to the active front month
-    or IB may fail/hang on qualify.
+    (native futures + equities). Pass a ``symbol_map`` override to the
+    constructor to replace ``DEFAULT_SYMBOL_MAP``. Roll
+    ``lastTradeDateOrContractMonth`` to the active front month or IB may
+    fail/hang on qualify.
+
+    Configuration is loaded from ``IB_*`` env vars via ``IBSettings``; the
+    broker self-loads unless a settings object is injected.
     """
 
     DEFAULT_SYMBOL_MAP: dict[str, dict] = {
@@ -33,11 +39,16 @@ class IBBroker(BrokerBase):
         "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
     }
 
-    def __init__(self, settings: BrokerSettings) -> None:
+    def __init__(
+        self,
+        settings: Optional[IBSettings] = None,
+        *,
+        symbol_map: Optional[dict[str, dict]] = None,
+    ) -> None:
         from ib_async import IB
 
-        self._settings = settings
-        self._symbol_map = settings.symbol_map or self.DEFAULT_SYMBOL_MAP
+        self._settings = settings if settings is not None else IBSettings()
+        self._symbol_map = symbol_map or self.DEFAULT_SYMBOL_MAP
         self.ib = IB()
         self._contract_cache: dict[str, object] = {}
         # Set when IBKR reports a competing live session (error 10197); cleared
@@ -67,18 +78,18 @@ class IBBroker(BrokerBase):
         self.ib.errorEvent += _on_ib_error
 
         self.ib.connect(
-            host=self._settings.ib_host,
-            port=self._settings.ib_port,
-            clientId=self._settings.ib_client_id,
+            host=self._settings.host,
+            port=self._settings.port,
+            clientId=self._settings.client_id,
             timeout=20,
             readonly=False,
         )
-        mdt = self._settings.ib_market_data_type
+        mdt = self._settings.market_data_type
         self.ib.reqMarketDataType(mdt)
         mdt_labels = {1: "live", 2: "frozen", 3: "delayed", 4: "delayed-frozen"}
         logger.success(
-            f"Connected to IB Gateway  {self._settings.ib_host}:{self._settings.ib_port}  "
-            f"(clientId={self._settings.ib_client_id}, marketDataType={mdt_labels.get(mdt, mdt)})"
+            f"Connected to IB Gateway  {self._settings.host}:{self._settings.port}  "
+            f"(clientId={self._settings.client_id}, marketDataType={mdt_labels.get(mdt, mdt)})"
         )
 
     def disconnect(self) -> None:

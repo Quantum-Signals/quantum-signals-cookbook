@@ -39,7 +39,7 @@ def _fire(strategy: MomentumStrategy, symbol: str, signal_value: int) -> None:
 class TestMomentumStrategy:
     def _make_strategy(self, **settings_kw):
         settings = _make_settings(**settings_kw)
-        broker = SimulatedBroker(settings)
+        broker = SimulatedBroker()
         broker.connect()
         perf = PerformanceTracker()
         strategy = MomentumStrategy(broker, perf, settings)

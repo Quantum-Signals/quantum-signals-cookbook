@@ -13,14 +13,14 @@ from qs_trader_broker_core.base import (
     OrderResult,
     normalize_position_side,
 )
-from qs_trader_broker_core.settings import BrokerSettings
+from qs_trader_broker_core.settings import SimulatedSettings
 from qs_trader_broker_core.simulated import SimContract, SimulatedBroker
 
 __all__ = [
     "BrokerBase",
-    "BrokerSettings",
     "OrderResult",
     "normalize_position_side",
     "SimContract",
     "SimulatedBroker",
+    "SimulatedSettings",
 ]
