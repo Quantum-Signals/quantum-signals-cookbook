@@ -168,8 +168,9 @@ live-trader/                # uv workspace root (the app)
 │   └── strategy/           # momentum, signal_follower
 ├── src/brokers/            # broker packages (uv workspace members)
 │   ├── core/               # qs-trader-broker-core: BrokerBase, OrderResult, SimulatedBroker
+│   │   └── tests/          #   package's own tests (SimulatedBroker)
 │   └── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
-├── tests/
+├── tests/                  # app-level tests (config, strategies, models)
 └── scripts/                # QS smoke test, multiday sim
 ```
 
@@ -534,7 +535,7 @@ uv run pytest -v
 | File | Covers |
 |------|--------|
 | `tests/test_models.py` | `PerformanceTracker` |
-| `tests/test_simulated_broker.py` | `SimulatedBroker` |
+| `src/brokers/core/tests/test_simulated_broker.py` | `SimulatedBroker` (co-located with the core broker package) |
 | `tests/test_strategy.py` | `MomentumStrategy` + `FakeSignal` |
 | `tests/test_signal_follower.py` | ET windows, flatten, filters |
 
