@@ -52,6 +52,11 @@ class AlpacaBroker(BrokerBase):
     price already resolved.
     """
 
+    # Alpaca fills fractional equity/ETF quantities (long side). The strategy
+    # layer reads this to size orders fractionally; fractional shorts are still
+    # rejected by Alpaca (code 42210000) and handled per-leg in the strategy.
+    supports_fractional: bool = True
+
     DEFAULT_SYMBOL_MAP: dict[str, str] = {
         "ES": "SPY",
         "NQ": "QQQ",

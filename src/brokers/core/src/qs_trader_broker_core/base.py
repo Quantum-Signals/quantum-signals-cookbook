@@ -61,7 +61,16 @@ class BrokerBase(ABC):
     To add a broker, subclass this and implement all abstract methods. Follow
     the per-method contracts below — especially the ``None`` conventions, which
     the strategy layer relies on to skip untradable symbols and failed orders.
+
+    Declare broker capabilities the strategy layer branches on (e.g.
+    ``supports_fractional``) via class attributes so the app never has to know
+    a broker by name.
     """
+
+    #: Whether this broker can fill fractional-share quantities. The strategy
+    #: layer reads this (never a broker name) to decide whole-share vs.
+    #: fractional order sizing. Override to ``True`` on brokers that support it.
+    supports_fractional: bool = False
 
     @abstractmethod
     def connect(self) -> None: ...

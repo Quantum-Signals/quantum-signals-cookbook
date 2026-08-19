@@ -30,6 +30,11 @@ class SimulatedBroker(BrokerBase):
     can exercise arbitrary symbols.
     """
 
+    # Simulates fractional fills (and mimics Alpaca's fractional-short
+    # rejection, code 42210000), so DRY_RUN exercises the same fractional
+    # sizing path as the live equity/ETF broker it stands in for.
+    supports_fractional: bool = True
+
     DEFAULT_SYMBOL_MAP: dict[str, dict] = {
         "ES":   {"symbol": "ES",   "secType": "FUT", "exchange": "CME",   "currency": "USD"},
         "NQ":   {"symbol": "NQ",   "secType": "FUT", "exchange": "CME",   "currency": "USD"},

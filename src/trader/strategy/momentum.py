@@ -124,7 +124,9 @@ class MomentumStrategy(StrategyBase):
 
         self._interval_minutes = settings.execution_interval_minutes
         self._interval_s = self._interval_minutes * 60
-        self._use_fractional = settings.broker == "alpaca"
+        # Broker capability, not a broker name: any broker that declares
+        # supports_fractional gets fractional sizing (see BrokerBase).
+        self._use_fractional = broker.supports_fractional
 
         self._allowed: set[str] = set(settings.allowed_symbols) if settings.allowed_symbols else set()
 
