@@ -2,9 +2,11 @@
 
 An algorithmic trading bot that streams real-time signals from [QuantumSignals](https://quantumsignals.io) and executes trades automatically through **Alpaca** or **Interactive Brokers**.
 
-**Developer documentation:** [documentation.md](documentation.md) — architecture, module map, position-sizing logic, local development.
+**Developer documentation:** [docs/architecture.md](docs/architecture.md) — architecture, module map, position-sizing logic, local development.
 
-**QuantumSignals API client:** [QS documentation.md](QS%20documentation.md) — signal streaming, symbol names, backtests.
+**Broker plugin architecture:** [docs/brokers.md](docs/brokers.md) — how brokers plug in, and how to add your own.
+
+**QuantumSignals API client:** [docs/quantumsignals-client.md](docs/quantumsignals-client.md) — signal streaming, symbol names, backtests.
 
 ---
 

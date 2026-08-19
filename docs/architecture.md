@@ -37,6 +37,7 @@ A long-running Python process that:
 |------|----------|
 | [README.md](README.md) | Deploy and configure via Docker / `.env` |
 | **documentation.md** (this file) | Code structure and trading logic |
+| [brokers.md](brokers.md) | Broker plugin architecture; add your own broker |
 | [QS documentation.md](QS%20documentation.md) | `quantumsignals-client` API usage |
 
 ### Tech stack
@@ -187,51 +188,19 @@ live-trader/                # uv workspace root (the app)
 
 ### Brokers (separate workspace packages)
 
-Brokers live in their own uv workspace packages under `src/brokers/`, each
-owning its broker SDK:
+Brokers are plugins: separate uv workspace packages under `src/brokers/`, each
+owning its SDK and registered via a `qs_trader_brokers` entry point that
+`create_broker` discovers at runtime. Full architecture, the `BrokerBase`
+interface, and a "create your own broker" walkthrough live in
+**[brokers.md](brokers.md)**.
 
-| Package | Module | Provides | SDK dep |
-|---------|--------|----------|---------|
-| `qs-trader-broker-core` | `qs_trader_broker_core` | `BrokerBase`, `OrderResult`, `SimulatedBroker` | — |
-| `qs-trader-broker-alpaca` | `qs_trader_broker_alpaca` | `AlpacaBroker`, `AlpacaSettings` (`ALPACA_*`) | `alpaca-py` |
-| `qs-trader-broker-ibkr` | `qs_trader_broker_ibkr` | `IBBroker`, `IBSettings` (`IB_*`) | `ib-async` |
-
-`create_broker(settings)` in the app's
-[`brokers/__init__.py`](src/trader/brokers/__init__.py) selects a broker:
-
-```
-TRADER_DRY_RUN=true       → simulated broker (SimulatedBroker, in core)
-TRADER_BROKER=alpaca      → AlpacaBroker   (REST, ETFs, fractional longs)
-TRADER_BROKER=ibkr        → IBBroker       (ib_async, futures + stocks)
-```
-
-Brokers are **discovered via entry points**, not a hardcoded list. Each broker
-package registers under the `qs_trader_brokers` group in **its own**
-`pyproject.toml`; `create_broker` builds the name→class registry at runtime with
-`importlib.metadata.entry_points`. Installing a package that registers a broker
-under this group makes it selectable via `TRADER_BROKER=<name>` with no core change. An
-unknown `TRADER_BROKER` raises a `ValueError` listing the installed brokers.
-
-**Dependency graph (a DAG — no import cycle).** Broker packages depend on
-`qs-trader-broker-core`, never on the app. Each broker **owns and self-loads its
-own configuration** from namespaced env vars via `pydantic-settings`
-(`AlpacaSettings` reads `ALPACA_*`, `IBSettings` reads `IB_*`), so
-`create_broker()` constructs a broker with no arguments and the app passes it no
-config — a broker package imports nothing from `trader`. The app's `Settings`
-only decides *which* broker to run (`TRADER_DRY_RUN` / `TRADER_BROKER`).
-
-```
-trader (app) ──→ qs-trader-broker-core ←── qs-trader-broker-alpaca
-     │                                  ←── qs-trader-broker-ibkr
-     └──→ alpaca / ibkr packages (default install; drop one for a slimmer build)
-```
+Broker-specific quirks worth knowing here:
 
 | Class | Notes |
 |-------|-------|
-| `BrokerBase` | `connect`, `resolve_contract`, `place_order`, `get_positions_for_sync`, … |
 | `AlpacaBroker` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
-| `IBBroker` | Qualifies futures from `symbol_map`; error 10197 = competing session |
-| `SimulatedBroker` | Jittered `sim_prices`; no external broker |
+| `IBBroker` | Qualifies futures from its symbol map; error 10197 = competing session |
+| `SimulatedBroker` | Jittered seed prices (`SIM_PRICE_JITTER`, `0` = deterministic); no external broker |
 
 ### Strategies (`src/trader/strategy/`)
 
@@ -511,19 +480,11 @@ Three layers: `TRADER_DRY_RUN` (simulated) → `TRADER_BROKER` (Alpaca vs IBKR) 
 
 ### Symbol maps & code-only settings
 
-Each broker **owns its own symbol map** as a class attribute, so a reader opens
-one broker file to see how it maps QS symbols:
-
-| Map | Location | Purpose |
-|-----|----------|---------|
-| `AlpacaBroker.DEFAULT_SYMBOL_MAP` | `qs_trader_broker_alpaca` | QS symbol → tradable ETF/stock ticker |
-| `IBBroker.DEFAULT_SYMBOL_MAP` | `qs_trader_broker_ibkr` | QS symbol → IB contract spec; **roll `lastTradeDateOrContractMonth`** |
-| `SimulatedBroker.DEFAULT_SYMBOL_MAP` / `.DEFAULT_PRICES` | `qs_trader_broker_core` | Dry-run contract shapes & price seeds |
-| `contract_multipliers` | `config.py` (`_DEFAULT_CONTRACT_MULTIPLIERS`) | EOD flatten PnL for futures (broker-neutral) |
-
-Each broker accepts an optional `symbol_map` (and the simulator, `sim_prices`)
-constructor override for tests; the app does not pass one, so the broker's own
-default is used at runtime.
+Each broker owns its own symbol map (QS symbol → broker-native contract) as a
+class attribute — see [brokers.md § Symbol maps](brokers.md#symbol-maps). The
+one broker-neutral map that stays in the app is `contract_multipliers`
+(`config.py`, `_DEFAULT_CONTRACT_MULTIPLIERS`) — the futures point-values used
+for EOD-flatten PnL.
 
 ### Adding a strategy
 
@@ -534,23 +495,7 @@ default is used at runtime.
 
 ### Adding a broker
 
-A broker is its own package (in-tree under `src/brokers/`, or external):
-
-1. Create a package that depends on `qs-trader-broker-core`. In-tree, add a
-   directory under `src/brokers/`; the workspace glob picks it up.
-2. Define a `pydantic-settings` `BaseSettings` for the broker's config with a
-   namespaced `env_prefix` (e.g. `MYBROKER_`). Do **not** import `trader` —
-   that keeps the package graph a DAG.
-3. Subclass `BrokerBase` (implement the abstract methods; own a
-   `DEFAULT_SYMBOL_MAP`). Have `__init__(self, settings=None)` self-load its
-   settings (`settings or MyBrokerSettings()`), so `create_broker()` builds it
-   with no arguments.
-4. Register the broker under the `qs_trader_brokers` entry-point group in the
-   package's own `pyproject.toml`:
-   `[project.entry-points.qs_trader_brokers]` → `myname = "my_module:MyBroker"`.
-5. `uv sync` so the entry-point metadata is written, then select it with
-   `TRADER_BROKER=myname` and configure it via `MYBROKER_*` env vars. No change to
-   `create_broker` — an external `uv add my-broker-package` works the same way.
+See **[brokers.md § Create your own broker](brokers.md#create-your-own-broker)**.
 
 ### Settings not loaded from environment
 
