@@ -93,9 +93,11 @@ class SimulatedBroker(BrokerBase):
         if base is None:
             base = 1000.0
             self._prices[contract.symbol] = base
-        jitter = base * random.uniform(-0.001, 0.001)
-        self._prices[contract.symbol] = base + jitter
-        return round(self._prices[contract.symbol], 2)
+        j = self._settings.price_jitter
+        if j:
+            base = base + base * random.uniform(-j, j)
+            self._prices[contract.symbol] = base
+        return round(base, 2)
 
     def place_order(
         self,

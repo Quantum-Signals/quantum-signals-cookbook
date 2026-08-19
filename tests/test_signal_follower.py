@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from trader.config import Settings
-from qs_trader_broker_core import SimulatedBroker
+from qs_trader_broker_core import SimulatedBroker, SimulatedSettings
 from trader.models import PerformanceTracker, Signal
 from trader.strategy.signal_follower import SignalFollowerStrategy
 
@@ -38,7 +38,8 @@ def _make_strategy(**settings_kw):
     from datetime import date
 
     settings = _make_settings(**settings_kw)
-    broker = SimulatedBroker()
+    # price_jitter=0.0 → deterministic prices so order sizing is reproducible.
+    broker = SimulatedBroker(SimulatedSettings(price_jitter=0.0))
     broker.connect()
     perf = PerformanceTracker()
     strategy = SignalFollowerStrategy(broker, perf, settings)
@@ -327,7 +328,7 @@ class TestSignalFollowerSymbolFilter:
 class TestPreMarketCleanup:
     def test_sync_positions_closes_existing(self):
         settings = _make_settings()
-        broker = SimulatedBroker()
+        broker = SimulatedBroker(SimulatedSettings(price_jitter=0.0))
         broker.connect()
         contract = broker.resolve_contract("ES")
         broker.place_order(contract, "BUY", 3, 5450.0)
@@ -340,7 +341,7 @@ class TestPreMarketCleanup:
 
     def test_pre_market_cleanup_on_first_signal(self):
         settings = _make_settings()
-        broker = SimulatedBroker()
+        broker = SimulatedBroker(SimulatedSettings(price_jitter=0.0))
         broker.connect()
         contract = broker.resolve_contract("NQ")
         broker.place_order(contract, "SELL", 2, 19200.0)

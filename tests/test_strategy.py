@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from trader.config import Settings
-from qs_trader_broker_core import SimulatedBroker
+from qs_trader_broker_core import SimulatedBroker, SimulatedSettings
 from trader.models import PerformanceTracker, Signal
 from trader.strategy.momentum import MomentumStrategy
 
@@ -41,7 +41,8 @@ def _fire(strategy: MomentumStrategy, symbol: str, signal_value: int) -> None:
 class TestMomentumStrategy:
     def _make_strategy(self, **settings_kw):
         settings = _make_settings(**settings_kw)
-        broker = SimulatedBroker()
+        # price_jitter=0.0 → deterministic prices so order sizing is reproducible.
+        broker = SimulatedBroker(SimulatedSettings(price_jitter=0.0))
         broker.connect()
         perf = PerformanceTracker()
         strategy = MomentumStrategy(broker, perf, settings)
@@ -79,17 +80,15 @@ class TestMomentumStrategy:
         _fire(strategy, "ES", Signal.UP)
         assert len(broker.get_open_positions()) == 1
 
-        # Second DOWN reduces / closes the long.  The simulated broker jitters
-        # the price ±0.1% on every get_last_price call, so the UP and DOWN
-        # slice sizes are computed at slightly different prices and don't cancel
-        # out to exactly zero shares.  We check near-flat (< 0.01 shares
-        # residual) rather than strict zero.
+        # Second DOWN closes the long. With deterministic sim prices
+        # (price_jitter=0.0) the UP and DOWN slices are the same size, so the
+        # net cancels to exactly flat.
         _fire(strategy, "ES", Signal.DOWN)
         spy_pos = next(
             (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
-        assert abs(spy_pos) < 0.01, (
-            f"Expected near-flat after UP+DOWN, got pos={spy_pos}"
+        assert spy_pos == 0.0, (
+            f"Expected flat after UP+DOWN, got pos={spy_pos}"
         )
 
     def test_long_closed_on_stable(self):
@@ -109,13 +108,12 @@ class TestMomentumStrategy:
         strategy, broker, perf = self._make_strategy()
         _fire(strategy, "ES", Signal.DOWN)
         _fire(strategy, "ES", Signal.UP)
-        # After DOWN then UP the short closes. Due to price jitter between the
-        # two signal evaluations the resulting net is near-flat but not always
-        # exactly zero. The key check: no significant short remains.
+        # After DOWN then UP the short closes. With deterministic sim prices the
+        # equal slices cancel to exactly flat.
         spy_pos = next(
             (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
-        assert spy_pos > -1.0, f"Expected near-flat after DOWN+UP, got {spy_pos}"
+        assert spy_pos == 0.0, f"Expected flat after DOWN+UP, got {spy_pos}"
         assert perf.total_trades == 1  # short trade was closed
 
     def test_short_closed_on_stable(self):
@@ -217,11 +215,10 @@ class TestMomentumStrategy:
         long_qty = next(p["pos"] for p in positions if p["symbol"] == "SPY")
         assert long_qty > 0
 
-        # Send more DOWNs than UPs so we are guaranteed to clear all longs
-        # AND open a short. A small extra buffer covers price-jitter residuals:
-        # because slice sizes are computed from the live simulated price (which
-        # jitters ±0.1%), 5 DOWN slices don't always exactly cancel 5 UP slices.
-        n_down = n_up + 3  # plenty to clear longs + build a short
+        # Send more DOWNs than UPs so we clear all longs AND open a short:
+        # with deterministic prices the first n_up DOWN slices cancel the longs
+        # exactly, and the extra slices build the short.
+        n_down = n_up + 3  # clear longs + build a short
         for _ in range(n_down):
             _fire(strategy, "S&P500", Signal.DOWN)
 
