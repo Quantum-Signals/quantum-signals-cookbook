@@ -54,9 +54,10 @@ class Settings(BaseSettings):
     broker: str = "alpaca"
     max_stream_retries: int = 5
     strategy: str = "momentum"  # "momentum" or "signal_follower"
-    # NoDecode: keep the raw env string so ``_split_symbols`` handles the
-    # comma list instead of pydantic-settings trying to JSON-decode it.
-    allowed_symbols: Annotated[tuple[str, ...], NoDecode] = ()  # empty = allow all
+    # Comma-separated in the env var (``TRADER_ALLOWED_SYMBOLS=ES,NQ``); empty =
+    # allow all. NoDecode keeps the raw string so ``_split_symbols`` handles it
+    # instead of pydantic-settings trying to JSON-decode a list.
+    allowed_symbols: Annotated[list[str], NoDecode] = []
     close_on_exit: bool = True
     daily_start_capital: float = 1_000_000.0
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
@@ -90,9 +91,9 @@ class Settings(BaseSettings):
     @field_validator("allowed_symbols", mode="before")
     @classmethod
     def _split_symbols(cls, v: object) -> object:
-        """Accept a comma-separated string (``"ES,NQ"``) or a sequence."""
+        """Accept a comma-separated string (``"ES,NQ"``) or a list."""
         if isinstance(v, str):
-            return tuple(s.strip() for s in v.split(",") if s.strip())
+            return [s.strip() for s in v.split(",") if s.strip()]
         return v
 
 

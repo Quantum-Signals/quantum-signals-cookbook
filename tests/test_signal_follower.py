@@ -296,7 +296,7 @@ class TestSignalFollowerGapWindow:
 
 class TestSignalFollowerSymbolFilter:
     def test_allowed_symbols_filter(self):
-        strategy, broker, perf = _make_strategy(allowed_symbols=("ES", "NQ"))
+        strategy, broker, perf = _make_strategy(allowed_symbols=["ES", "NQ"])
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
@@ -313,7 +313,7 @@ class TestSignalFollowerSymbolFilter:
         assert "YM" not in symbols
 
     def test_empty_allowed_means_all(self):
-        strategy, broker, perf = _make_strategy(allowed_symbols=())
+        strategy, broker, perf = _make_strategy(allowed_symbols=[])
         strategy.handle_signal(
             FakeSignal(symbol="YM", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
