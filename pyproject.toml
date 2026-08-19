@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "loguru>=0.7.3",
+    "pydantic-settings>=2.0",
     "python-dotenv>=1.2.2",
     "quantumsignals-client>=0.6.0",
     # Broker packages (workspace members). Each owns its own broker SDK

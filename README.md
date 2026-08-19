@@ -12,7 +12,7 @@ An algorithmic trading bot that streams real-time signals from [QuantumSignals](
 
 - [Docker](https://docs.docker.com/get-docker/) installed on your machine
 - A **QuantumSignals** API key — get one at [quantumsignals.io](https://quantumsignals.io)
-- An **Alpaca** account and API keys (only when `DRY_RUN=false` and `BROKER=alpaca`) — [alpaca.markets](https://alpaca.markets)
+- An **Alpaca** account and API keys (only when `TRADER_DRY_RUN=false` and `TRADER_BROKER=alpaca`) — [alpaca.markets](https://alpaca.markets)
 
 ---
 
@@ -27,23 +27,23 @@ Copy `.env.example` or create a file named `.env` in any folder on your machine:
 QUANTUMSIGNALS_API_KEY=your_qs_api_key_here
 
 # ── Safety (start here — no broker credentials needed) ───
-DRY_RUN=true
+TRADER_DRY_RUN=true
 
 # ── Paper trading (step 2 — uncomment when ready) ─────────
-# DRY_RUN=false
-# BROKER=alpaca
+# TRADER_DRY_RUN=false
+# TRADER_BROKER=alpaca
 # ALPACA_API_KEY=your_alpaca_api_key_here
 # ALPACA_SECRET_KEY=your_alpaca_secret_key_here
 # ALPACA_PAPER=true
 
 # ── Strategy ──────────────────────────────────────────────
-STRATEGY=momentum
-ALLOWED_SYMBOLS=ES,NQ          # or S&P500,Nasdaq100 (QS client ≥ 0.6.0)
+TRADER_STRATEGY=momentum
+TRADER_ALLOWED_SYMBOLS=ES,NQ          # or S&P500,Nasdaq100 (QS client ≥ 0.6.0)
 
 # ── Execution ─────────────────────────────────────────────
-EXECUTION_INTERVAL_MINUTES=5
-DAILY_START_CAPITAL=100000
-CLOSE_ON_EXIT=true
+TRADER_EXECUTION_INTERVAL_MINUTES=5
+TRADER_DAILY_START_CAPITAL=100000
+TRADER_CLOSE_ON_EXIT=true
 ```
 
 See [Paper Trading vs Live Trading](#paper-trading-vs-live-trading) for the recommended progression from simulation → paper → live.
@@ -85,7 +85,7 @@ ls logs/session_$(date +%Y-%m-%d)_*.log
 docker stop live-trader
 ```
 
-If `CLOSE_ON_EXIT=true` (the default), all open positions are automatically flattened on shutdown.
+If `TRADER_CLOSE_ON_EXIT=true` (the default), all open positions are automatically flattened on shutdown.
 
 ---
 
@@ -95,16 +95,16 @@ All settings are passed as environment variables in the `.env` file (or via Dock
 `--env-file`). One CLI override is also supported:
 
 ```bash
-uv run live-trader --execution-interval 10   # overrides EXECUTION_INTERVAL_MINUTES
+uv run live-trader --execution-interval 10   # overrides TRADER_EXECUTION_INTERVAL_MINUTES
 ```
 
 ### Required
 
 | Variable | Description |
 |---|---|
-| `QUANTUMSIGNALS_API_KEY` | Your QuantumSignals API key (always required, even in `DRY_RUN`) |
+| `QUANTUMSIGNALS_API_KEY` | Your QuantumSignals API key (always required, even in `TRADER_DRY_RUN`) |
 
-Alpaca credentials are required only when `DRY_RUN=false` **and** `BROKER=alpaca`:
+Alpaca credentials are required only when `TRADER_DRY_RUN=false` **and** `TRADER_BROKER=alpaca`:
 
 | Variable | Description |
 |---|---|
@@ -115,25 +115,25 @@ Alpaca credentials are required only when `DRY_RUN=false` **and** `BROKER=alpaca
 
 | Variable | Default | Description |
 |---|---|---|
-| `DRY_RUN` | `true` | `true` = simulated broker — no real orders, no Alpaca/IB connection needed for trading |
-| `BROKER` | `alpaca` | Broker to use: `alpaca` or `ibkr` (ignored when `DRY_RUN=true`) |
+| `TRADER_DRY_RUN` | `true` | `true` = simulated broker — no real orders, no Alpaca/IB connection needed for trading |
+| `TRADER_BROKER` | `alpaca` | Broker to use: `alpaca` or `ibkr` (ignored when `TRADER_DRY_RUN=true`) |
 | `ALPACA_PAPER` | `true` | `true` = Alpaca paper account, `false` = Alpaca live account (real money) |
 
 ### Strategy
 
 | Variable | Default | Description |
 |---|---|---|
-| `STRATEGY` | `momentum` | Trading strategy: `momentum` or `signal_follower` |
-| `ALLOWED_SYMBOLS` | *(all)* | Comma-separated QS symbol filter, e.g. `ES,NQ` or `S&P500,Nasdaq100`. Empty = allow all mapped symbols |
-| `EXECUTION_INTERVAL_MINUTES` | `5` | **momentum:** minutes between executions per symbol (gated on signal timestamp). **signal_follower:** N-minute decision grid |
+| `TRADER_STRATEGY` | `momentum` | Trading strategy: `momentum` or `signal_follower` |
+| `TRADER_ALLOWED_SYMBOLS` | *(all)* | Comma-separated QS symbol filter, e.g. `ES,NQ` or `S&P500,Nasdaq100`. Empty = allow all mapped symbols |
+| `TRADER_EXECUTION_INTERVAL_MINUTES` | `5` | **momentum:** minutes between executions per symbol (gated on signal timestamp). **signal_follower:** N-minute decision grid |
 
 ### Risk & Behaviour
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLOSE_ON_EXIT` | `true` | Flatten all open positions when the bot stops |
-| `DAILY_START_CAPITAL` | `100000` | **momentum:** splits this notional across active symbols for order sizing. **signal_follower:** used only for return % in log summaries |
-| `SIGNAL_QUEUE_MAXSIZE` | `0` | Max buffered signals (`0` = unlimited) |
+| `TRADER_CLOSE_ON_EXIT` | `true` | Flatten all open positions when the bot stops |
+| `TRADER_DAILY_START_CAPITAL` | `100000` | **momentum:** splits this notional across active symbols for order sizing. **signal_follower:** used only for return % in log summaries |
+| `TRADER_SIGNAL_QUEUE_MAXSIZE` | `0` | Max buffered signals (`0` = unlimited) |
 
 ### Session window & multi-day mode
 
@@ -154,16 +154,16 @@ the *upcoming* day's file.
 
 | Variable | Default | Description |
 |---|---|---|
-| `SESSION_START_TIME` | `09:30` | Local time at which a new trading day resumes |
-| `SESSION_END_TIME`   | `15:55` | Local time at which positions are flattened and the daily summary is logged |
-| `SESSION_TIMEZONE`   | `America/New_York` | Timezone for the times above |
-| `RUN_DAYS`           | `0` | `0` = run indefinitely; `1` = exit after first EOD (legacy single-day behaviour); `N` = exit after N EODs |
+| `TRADER_SESSION_START_TIME` | `09:30` | Local time at which a new trading day resumes |
+| `TRADER_SESSION_END_TIME`   | `15:55` | Local time at which positions are flattened and the daily summary is logged |
+| `TRADER_SESSION_TIMEZONE`   | `America/New_York` | Timezone for the times above |
+| `TRADER_RUN_DAYS`           | `0` | `0` = run indefinitely; `1` = exit after first EOD (legacy single-day behaviour); `N` = exit after N EODs |
 
 Weekends are skipped automatically. US holidays are **not** detected — on a
 holiday the bot wakes up normally but the QS stream simply produces no
 actionable signals, so the day passes with an empty summary.
 
-### Interactive Brokers (optional — only if `BROKER=ibkr`)
+### Interactive Brokers (optional — only if `TRADER_BROKER=ibkr`)
 
 | Variable | Default | Description |
 |---|---|---|
@@ -183,10 +183,10 @@ futures can be traded directly when listed in the symbol map.
 
 ### `momentum` (default)
 
-Incrementally builds a sized position on a fixed time grid (`EXECUTION_INTERVAL_MINUTES`, default 5 min).
+Incrementally builds a sized position on a fixed time grid (`TRADER_EXECUTION_INTERVAL_MINUTES`, default 5 min).
 
 - **When it trades:** at most **one execution per symbol per interval**, gated on the signal's own timestamp (not wall-clock arrival time).
-- **Order size:** each UP/DOWN slice is sized so daily notional ≈ `DAILY_START_CAPITAL / n_active_symbols` (e.g. $100k across ES + NQ → ~$50k per symbol per day).
+- **Order size:** each UP/DOWN slice is sized so daily notional ≈ `TRADER_DAILY_START_CAPITAL / n_active_symbols` (e.g. $100k across ES + NQ → ~$50k per symbol per day).
 - **Broker reconciliation:** every tick re-reads the broker position and plans close-then-open legs, so failed orders, partial fills, or manual trades self-heal on the next interval.
 - **Fractional shares:** enabled on Alpaca (fractional longs; whole-share shorts with a reserve for sub-share intent). IBKR uses whole shares.
 - **Signal symbols:** `ES`, `NQ`, `S&P500`, `Nasdaq100`, `SPY`, `QQQ` (QS client ≥ 0.6.0 may emit full names or ETF tickers directly).
@@ -195,14 +195,14 @@ Incrementally builds a sized position on a fixed time grid (`EXECUTION_INTERVAL_
 
 Discrete intraday strategy that trades **exactly 1 share** per actionable signal minute on the mapped ETF.
 
-- **Decision grid:** on every N-minute boundary (`EXECUTION_INTERVAL_MINUTES`), the latest signal sets an *active decision* — UP → go long, DOWN → go short, STABLE → pause.
+- **Decision grid:** on every N-minute boundary (`TRADER_EXECUTION_INTERVAL_MINUTES`), the latest signal sets an *active decision* — UP → go long, DOWN → go short, STABLE → pause.
 - **Execution:** every signal minute inside the trading window with an active decision places a 1-share BUY or SELL.
 - **ET session windows (hardcoded):**
   - **Pre-market** (before 9:45 AM): flatten any stale broker positions
   - **Trading** (9:45 AM – 3:30 PM): execute active decisions
   - **Close** (3:55 – 4:00 PM): flatten all positions (also driven by `tick()` even without new signals)
 - **Signal symbols:** `ES`, `NQ`, `S&P500`, `Nasdaq100` → traded as `SPY` / `QQQ` on Alpaca.
-- **`DAILY_START_CAPITAL`:** does not affect order size — only the return % shown in day summaries.
+- **`TRADER_DAILY_START_CAPITAL`:** does not affect order size — only the return % shown in day summaries.
 
 | Aspect | `momentum` | `signal_follower` |
 |---|---|---|
@@ -228,7 +228,7 @@ QuantumSignals may emit signals under **legacy futures tickers** (`ES`, `NQ`) or
 | `SPY` | SPY | SPY stock |
 | `QQQ` | QQQ | QQQ stock |
 
-Set `ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100` or
+Set `TRADER_ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100` or
 `ES,NQ`), not the ETF ticker.
 
 ### IBKR-only symbols (no QS mapping — futures/stocks in symbol map)
@@ -251,25 +251,25 @@ rejected at order time.
 
 The bot has **three layers** of safety, applied in this order:
 
-1. **`DRY_RUN`** — simulated broker (`SimulatedBroker`). No broker credentials
+1. **`TRADER_DRY_RUN`** — simulated broker (`SimulatedBroker`). No broker credentials
    needed for order placement. Use this first to verify signal streaming and strategy
    logic locally.
-2. **`BROKER`** — choose Alpaca (REST, ETFs) or IBKR (futures + equities via
-   Gateway/TWS). Ignored when `DRY_RUN=true`.
+2. **`TRADER_BROKER`** — choose Alpaca (REST, ETFs) or IBKR (futures + equities via
+   Gateway/TWS). Ignored when `TRADER_DRY_RUN=true`.
 3. **Paper vs live account** — broker-specific switch for real (but fake-money)
    vs real-money execution.
 
-### Alpaca (`BROKER=alpaca`)
+### Alpaca (`TRADER_BROKER=alpaca`)
 
-| `DRY_RUN` | `ALPACA_PAPER` | Result |
+| `TRADER_DRY_RUN` | `ALPACA_PAPER` | Result |
 |---|---|---|
 | `true` | any | Simulated — no Alpaca connection for orders |
 | `false` | `true` | Real orders to Alpaca **paper** account |
 | `false` | `false` | Real orders to Alpaca **live** account — **real money** |
 
-### Interactive Brokers (`BROKER=ibkr`)
+### Interactive Brokers (`TRADER_BROKER=ibkr`)
 
-| `DRY_RUN` | `IB_PORT` | Result |
+| `TRADER_DRY_RUN` | `IB_PORT` | Result |
 |---|---|---|
 | `true` | any | Simulated — no IB connection for orders |
 | `false` | `4002` (default) | Real orders via IB Gateway **paper** |
@@ -283,16 +283,16 @@ can reach IB Gateway on your host. On Linux, use your machine's LAN IP or
 
 ```env
 # 1. Verify signals + strategy logic (no broker needed)
-DRY_RUN=true
+TRADER_DRY_RUN=true
 
 # 2. Paper trade with real broker fills
-DRY_RUN=false
-BROKER=alpaca
+TRADER_DRY_RUN=false
+TRADER_BROKER=alpaca
 ALPACA_PAPER=true
 
 # 3. Live trading — only after paper results look correct
-DRY_RUN=false
-BROKER=alpaca
+TRADER_DRY_RUN=false
+TRADER_BROKER=alpaca
 ALPACA_PAPER=false
 ```
 

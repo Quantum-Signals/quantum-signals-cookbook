@@ -28,7 +28,7 @@ A long-running Python process that:
 
 1. Streams minute-level ML signals from QuantumSignals (SSE)
 2. Applies a pluggable strategy (`momentum` or `signal_follower`)
-3. Places orders at Alpaca, IBKR, or a simulated broker (`DRY_RUN`)
+3. Places orders at Alpaca, IBKR, or a simulated broker (`TRADER_DRY_RUN`)
 4. Flattens positions at session end and logs daily / run summaries
 
 ### Document map
@@ -101,7 +101,7 @@ Order of operations in [`src/trader/app.py`](src/trader/app.py):
 | Continuous | Drain `signal_queue` → `strategy.handle_signal()` | React to QS signals |
 | 1 s | `strategy.tick()` | Time-driven logic (`signal_follower` close window) |
 | 300 s | `report_once(broker, perf)` | Account NLV, positions, bot PnL |
-| Session end | `datetime >= SESSION_END_TIME` | Exit loop → EOD flatten |
+| Session end | `datetime >= TRADER_SESSION_END_TIME` | Exit loop → EOD flatten |
 
 ### Threading model
 
@@ -113,13 +113,13 @@ QS stream thread  →  signal_queue  →  main thread (strategy + broker)
 
 ### Multi-day supervisor
 
-When `RUN_DAYS=0` (default), the process runs until Ctrl-C:
+When `TRADER_RUN_DAYS=0` (default), the process runs until Ctrl-C:
 
-1. `_compute_next_session_window()` — next weekday `SESSION_START_TIME` → `SESSION_END_TIME`
+1. `_compute_next_session_window()` — next weekday `TRADER_SESSION_START_TIME` → `TRADER_SESSION_END_TIME`
 2. If before start → `_sleep_until()` (discards off-hours signals from queue)
 3. Pre-session `strategy.sync_positions()` again
 4. `_run_trading_day()` until EOD
-5. `_close_all_positions()` if `CLOSE_ON_EXIT`
+5. `_close_all_positions()` if `TRADER_CLOSE_ON_EXIT`
 6. `_log_day_summary()` → `perf.reset()` → `strategy.reset_for_new_day()`
 7. Sleep until next weekday (weekends skipped; **no US holiday calendar**)
 
@@ -132,7 +132,7 @@ When `RUN_DAYS=0` (default), the process runs until Ctrl-C:
 | Open positions | **Broker** | Source of truth; momentum re-fetches on every execution |
 | Net qty, reserve, decisions | **Strategy** | In-memory cache; synced / reset per day |
 | Closed-trade PnL, signal counts | **`PerformanceTracker`** | `perf.reset()` between days |
-| Buffered signals | **`queue.Queue`** | Optional cap via `SIGNAL_QUEUE_MAXSIZE` |
+| Buffered signals | **`queue.Queue`** | Optional cap via `TRADER_SIGNAL_QUEUE_MAXSIZE` |
 
 ### Shutdown paths
 
@@ -140,8 +140,8 @@ When `RUN_DAYS=0` (default), the process runs until Ctrl-C:
 |-------|----------|
 | Invalid QS API key | Stream sets `stop_event`, process exits |
 | Transient QS errors | Backoff, max 5 retries (`Settings.max_stream_retries`) |
-| Ctrl-C | Flatten if `CLOSE_ON_EXIT`, day summary, RUN SUMMARY |
-| `RUN_DAYS=N` | Exit after N completed EODs |
+| Ctrl-C | Flatten if `TRADER_CLOSE_ON_EXIT`, day summary, RUN SUMMARY |
+| `TRADER_RUN_DAYS=N` | Exit after N completed EODs |
 
 ---
 
@@ -200,17 +200,17 @@ owning its broker SDK:
 [`brokers/__init__.py`](src/trader/brokers/__init__.py) selects a broker:
 
 ```
-DRY_RUN=true       → simulated broker (SimulatedBroker, in core)
-BROKER=alpaca      → AlpacaBroker   (REST, ETFs, fractional longs)
-BROKER=ibkr        → IBBroker       (ib_async, futures + stocks)
+TRADER_DRY_RUN=true       → simulated broker (SimulatedBroker, in core)
+TRADER_BROKER=alpaca      → AlpacaBroker   (REST, ETFs, fractional longs)
+TRADER_BROKER=ibkr        → IBBroker       (ib_async, futures + stocks)
 ```
 
 Brokers are **discovered via entry points**, not a hardcoded list. Each broker
 package registers under the `qs_trader_brokers` group in **its own**
 `pyproject.toml`; `create_broker` builds the name→class registry at runtime with
 `importlib.metadata.entry_points`. Installing a package that registers a broker
-under this group makes it selectable via `BROKER=<name>` with no core change. An
-unknown `BROKER` raises a `ValueError` listing the installed brokers.
+under this group makes it selectable via `TRADER_BROKER=<name>` with no core change. An
+unknown `TRADER_BROKER` raises a `ValueError` listing the installed brokers.
 
 **Dependency graph (a DAG — no import cycle).** Broker packages depend on
 `qs-trader-broker-core`, never on the app. Each broker **owns and self-loads its
@@ -218,7 +218,7 @@ own configuration** from namespaced env vars via `pydantic-settings`
 (`AlpacaSettings` reads `ALPACA_*`, `IBSettings` reads `IB_*`), so
 `create_broker()` constructs a broker with no arguments and the app passes it no
 config — a broker package imports nothing from `trader`. The app's `Settings`
-only decides *which* broker to run (`DRY_RUN` / `BROKER`).
+only decides *which* broker to run (`TRADER_DRY_RUN` / `TRADER_BROKER`).
 
 ```
 trader (app) ──→ qs-trader-broker-core ←── qs-trader-broker-alpaca
@@ -280,13 +280,13 @@ QuantumSignals emits objects consumed by `handle_signal(signal)`.
 
 Defined in `_SIGNAL_TO_TRADE` in each strategy module (`momentum.py` includes `SPY`/`QQQ`; `signal_follower.py` does not). IBKR can also trade symbols listed in `config._DEFAULT_SYMBOL_MAP` (YM, RTY, MES, MNQ, CL, GC, AAPL) when signals exist and the symbol is allowed.
 
-Set `ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100`), not the ETF ticker.
+Set `TRADER_ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100`), not the ETF ticker.
 
 ---
 
 ### 4.2 `momentum` — position sizing & execution
 
-Default strategy (`STRATEGY=momentum`). Implements incremental position building on a fixed time grid.
+Default strategy (`TRADER_STRATEGY=momentum`). Implements incremental position building on a fixed time grid.
 
 #### Position sizing formula
 
@@ -301,11 +301,11 @@ qty_per_slice           = target_daily_notional_per_symbol / (executions_per_day
 **Budget split:**
 
 ```
-target_daily_notional_per_symbol = DAILY_START_CAPITAL / n_active_symbols
+target_daily_notional_per_symbol = TRADER_DAILY_START_CAPITAL / n_active_symbols
 ```
 
-- `n_active_symbols` = count of keys in `_SIGNAL_TO_TRADE` that pass `ALLOWED_SYMBOLS` (minimum 1). With no filter, all six mapped symbols count (`ES`, `NQ`, `S&P500`, `Nasdaq100`, `SPY`, `QQQ`).
-- Example: `$100,000` capital, `ALLOWED_SYMBOLS=ES,NQ` → **$50,000 notional per symbol per day**
+- `n_active_symbols` = count of keys in `_SIGNAL_TO_TRADE` that pass `TRADER_ALLOWED_SYMBOLS` (minimum 1). With no filter, all six mapped symbols count (`ES`, `NQ`, `S&P500`, `Nasdaq100`, `SPY`, `QQQ`).
+- Example: `$100,000` capital, `TRADER_ALLOWED_SYMBOLS=ES,NQ` → **$50,000 notional per symbol per day**
 
 **Broker rounding:**
 
@@ -314,15 +314,15 @@ target_daily_notional_per_symbol = DAILY_START_CAPITAL / n_active_symbols
 | Alpaca | `true` | `round(raw, 4)` shares |
 | IBKR / sim | `false` | `max(1, round(raw))` whole shares |
 
-Doubling `EXECUTION_INTERVAL_MINUTES` halves `executions_per_day` and **doubles** `qty_per_slice`, keeping approximate daily notional stable.
+Doubling `TRADER_EXECUTION_INTERVAL_MINUTES` halves `executions_per_day` and **doubles** `qty_per_slice`, keeping approximate daily notional stable.
 
 #### Worked example
 
 | Input | Value |
 |-------|-------|
-| `DAILY_START_CAPITAL` | $100,000 |
+| `TRADER_DAILY_START_CAPITAL` | $100,000 |
 | Active symbols | ES, NQ (2) |
-| `EXECUTION_INTERVAL_MINUTES` | 5 |
+| `TRADER_EXECUTION_INTERVAL_MINUTES` | 5 |
 | `executions_per_day` | 390 / 5 = **78** |
 | Per-symbol budget | $50,000 |
 | SPY price | $545 |
@@ -335,8 +335,8 @@ On IBKR the same inputs yield `max(1, round(1.1776)) = 1` share per slice.
 
 #### Per-interval behavior (`handle_signal`)
 
-1. Filter: null signal, `ALLOWED_SYMBOLS`, must have mapping in `_SIGNAL_TO_TRADE`
-2. **Interval gate:** at most one execution per symbol per `EXECUTION_INTERVAL_MINUTES`, comparing the **signal's UTC timestamp** (floored to whole seconds) against `_last_exec_time` — not wall-clock arrival time. This keeps ES and NQ aligned when they share the same QS bar timestamp.
+1. Filter: null signal, `TRADER_ALLOWED_SYMBOLS`, must have mapping in `_SIGNAL_TO_TRADE`
+2. **Interval gate:** at most one execution per symbol per `TRADER_EXECUTION_INTERVAL_MINUTES`, comparing the **signal's UTC timestamp** (floored to whole seconds) against `_last_exec_time` — not wall-clock arrival time. This keeps ES and NQ aligned when they share the same QS bar timestamp.
 3. **STABLE:** no order; timer still updated
 4. **UP / DOWN:** call `_execute()`
 
@@ -407,13 +407,13 @@ Unlike momentum (which mirrors broker holdings into strategy state), `signal_fol
 
 ### 4.3 `signal_follower` — discrete share logic
 
-`STRATEGY=signal_follower`. Trades **exactly 1 share** per actionable signal minute on the mapped ETF.
+`TRADER_STRATEGY=signal_follower`. Trades **exactly 1 share** per actionable signal minute on the mapped ETF.
 
 #### Position sizing
 
 **Fixed:** `_open_incremental()` always `place_order(..., qty=1)`.
 
-`DAILY_START_CAPITAL` is used only for **return % in log summaries**, not for order size.
+`TRADER_DAILY_START_CAPITAL` is used only for **return % in log summaries**, not for order size.
 
 #### Eastern Time windows
 
@@ -428,7 +428,7 @@ Hardcoded in [`signal_follower.py`](src/trader/strategy/signal_follower.py):
 
 #### Decision grid vs execution
 
-On minutes where `et_dt.minute % EXECUTION_INTERVAL_MINUTES == 0`:
+On minutes where `et_dt.minute % TRADER_EXECUTION_INTERVAL_MINUTES == 0`:
 
 | Signal | `_active_decision` |
 |--------|-------------------|
@@ -497,17 +497,17 @@ Full operator reference (env vars, strategies, symbols, paper vs live): [README.
 
 | Variable | Effect |
 |----------|--------|
-| `STRATEGY` | `momentum` vs `signal_follower` |
-| `DAILY_START_CAPITAL` | Momentum per-symbol daily notional; summary return % for both strategies |
-| `EXECUTION_INTERVAL_MINUTES` | Momentum execution gate; signal_follower decision grid |
-| `ALLOWED_SYMBOLS` | Filters QS symbols (comma-separated QS names, e.g. `S&P500,Nasdaq100`) |
-| `BROKER` | Alpaca fractional vs IBKR integer sizing (ignored when `DRY_RUN=true`) |
-| `DRY_RUN` | Simulated broker — no real orders |
-| `ALPACA_PAPER` / `IB_PORT` | Paper vs live account when `DRY_RUN=false` |
+| `TRADER_STRATEGY` | `momentum` vs `signal_follower` |
+| `TRADER_DAILY_START_CAPITAL` | Momentum per-symbol daily notional; summary return % for both strategies |
+| `TRADER_EXECUTION_INTERVAL_MINUTES` | Momentum execution gate; signal_follower decision grid |
+| `TRADER_ALLOWED_SYMBOLS` | Filters QS symbols (comma-separated QS names, e.g. `S&P500,Nasdaq100`) |
+| `TRADER_BROKER` | Alpaca fractional vs IBKR integer sizing (ignored when `TRADER_DRY_RUN=true`) |
+| `TRADER_DRY_RUN` | Simulated broker — no real orders |
+| `ALPACA_PAPER` / `IB_PORT` | Paper vs live account when `TRADER_DRY_RUN=false` |
 
 ### Paper vs live (summary)
 
-Three layers: `DRY_RUN` (simulated) → `BROKER` (Alpaca vs IBKR) → paper/live switch (`ALPACA_PAPER` or `IB_PORT`). See [README.md § Paper Trading vs Live Trading](README.md#paper-trading-vs-live-trading).
+Three layers: `TRADER_DRY_RUN` (simulated) → `TRADER_BROKER` (Alpaca vs IBKR) → paper/live switch (`ALPACA_PAPER` or `IB_PORT`). See [README.md § Paper Trading vs Live Trading](README.md#paper-trading-vs-live-trading).
 
 ### Symbol maps & code-only settings
 
@@ -549,7 +549,7 @@ A broker is its own package (in-tree under `src/brokers/`, or external):
    package's own `pyproject.toml`:
    `[project.entry-points.qs_trader_brokers]` → `myname = "my_module:MyBroker"`.
 5. `uv sync` so the entry-point metadata is written, then select it with
-   `BROKER=myname` and configure it via `MYBROKER_*` env vars. No change to
+   `TRADER_BROKER=myname` and configure it via `MYBROKER_*` env vars. No change to
    `create_broker` — an external `uv add my-broker-package` works the same way.
 
 ### Settings not loaded from environment
@@ -574,7 +574,7 @@ uv sync
 cp .env.example .env   # set QUANTUMSIGNALS_API_KEY at minimum
 
 # Safest: simulated broker
-DRY_RUN=true uv run live-trader
+TRADER_DRY_RUN=true uv run live-trader
 
 # CLI override
 uv run live-trader --execution-interval 10
@@ -606,7 +606,7 @@ uv run python scripts/test_multiday_sim.py
 uv run python scripts/tutorial.py
 ```
 
-`test_multiday_sim.py` stubs the QS thread and accelerates wall clock to verify multi-day logs and `RUN_DAYS` exit in seconds.
+`test_multiday_sim.py` stubs the QS thread and accelerates wall clock to verify multi-day logs and `TRADER_RUN_DAYS` exit in seconds.
 
 ---
 
@@ -627,8 +627,8 @@ uv run python scripts/tutorial.py
 | IB error 10197 | Competing TWS/Gateway — close other sessions |
 | Position drift | Pre-session `sync_positions()` — broker is truth |
 | Futures roll | Update `lastTradeDateOrContractMonth` in `config.py` |
-| `SESSION_END_TIME` | Default **15:55** ET — flatten before 16:00 auction |
-| Signal queue full | Set `SIGNAL_QUEUE_MAXSIZE` or speed up strategy |
+| `TRADER_SESSION_END_TIME` | Default **15:55** ET — flatten before 16:00 auction |
+| Signal queue full | Set `TRADER_SIGNAL_QUEUE_MAXSIZE` or speed up strategy |
 
 ### Recommended enhancements
 

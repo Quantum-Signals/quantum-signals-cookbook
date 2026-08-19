@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from dataclasses import dataclass, field
 
-from dotenv import load_dotenv
+from typing import Annotated
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 # Symbol → broker-native contract mapping lives with each broker that owns it
@@ -23,24 +25,38 @@ _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
 }
 
 
-@dataclass(frozen=True)
-class Settings:
-    """App-level (orchestration) settings.
+class Settings(BaseSettings):
+    """App-level (orchestration) settings, loaded from ``TRADER_*`` env vars.
 
     Broker connection settings and credentials are **not** here — each broker
-    package owns and self-loads its own config from namespaced env vars
+    package owns and self-loads its own config from its own namespaced env vars
     (``ALPACA_*``, ``IB_*``). This object only decides *which* broker to run
     (``dry_run`` / ``broker``) and drives the session/strategy layer.
+
+    Env var names carry a ``TRADER_`` prefix (e.g. ``TRADER_DRY_RUN``), except
+    ``qs_api_key`` which reads the QuantumSignals client's own
+    ``QUANTUMSIGNALS_API_KEY`` convention (unprefixed).
     """
 
-    qs_api_key: str
+    model_config = SettingsConfigDict(
+        env_prefix="TRADER_",
+        env_file=".env",
+        extra="ignore",
+        frozen=True,
+    )
+
+    # QuantumSignals API key — unprefixed, matching the QS client library's
+    # own env var. Required.
+    qs_api_key: str = Field(validation_alias="QUANTUMSIGNALS_API_KEY")
     dry_run: bool = True
-    # Broker selection: "ibkr" (default) or "alpaca". The broker's own
+    # Broker selection: "ibkr" or "alpaca" (default). The broker's own
     # connection settings live in its package (e.g. AlpacaSettings / IBSettings).
     broker: str = "alpaca"
     max_stream_retries: int = 5
     strategy: str = "momentum"  # "momentum" or "signal_follower"
-    allowed_symbols: tuple[str, ...] = ()  # empty = allow all
+    # NoDecode: keep the raw env string so ``_split_symbols`` handles the
+    # comma list instead of pydantic-settings trying to JSON-decode it.
+    allowed_symbols: Annotated[tuple[str, ...], NoDecode] = ()  # empty = allow all
     close_on_exit: bool = True
     daily_start_capital: float = 1_000_000.0
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
@@ -60,7 +76,24 @@ class Settings:
     #   1 = single-day mode (legacy behaviour: exit after first EOD).
     #   N = exit after N EODs.
     run_days: int = 0
-    contract_multipliers: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_CONTRACT_MULTIPLIERS))
+    # Broker-neutral PnL math; not env-driven.
+    contract_multipliers: dict[str, float] = Field(
+        default_factory=lambda: dict(_DEFAULT_CONTRACT_MULTIPLIERS),
+        exclude=True,
+    )
+
+    @field_validator("broker", "strategy", mode="before")
+    @classmethod
+    def _lowercase(cls, v: object) -> object:
+        return v.lower() if isinstance(v, str) else v
+
+    @field_validator("allowed_symbols", mode="before")
+    @classmethod
+    def _split_symbols(cls, v: object) -> object:
+        """Accept a comma-separated string (``"ES,NQ"``) or a sequence."""
+        if isinstance(v, str):
+            return tuple(s.strip() for s in v.split(",") if s.strip())
+        return v
 
 
 def _parse_cli_args() -> argparse.Namespace:
@@ -87,29 +120,14 @@ def _parse_cli_args() -> argparse.Namespace:
 
 
 def load_settings() -> Settings:
-    """Load settings from environment variables, .env file, and CLI args."""
-    load_dotenv()
+    """Load settings from ``TRADER_*`` env vars, the ``.env`` file, and CLI args.
+
+    The ``--execution-interval`` CLI flag, when given, overrides
+    ``TRADER_EXECUTION_INTERVAL_MINUTES`` — constructor args take precedence over
+    env values in pydantic-settings.
+    """
     cli = _parse_cli_args()
-
-    raw_symbols = os.getenv("ALLOWED_SYMBOLS", "").strip()
-    allowed: tuple[str, ...] = ()
-    if raw_symbols:
-        allowed = tuple(s.strip() for s in raw_symbols.split(",") if s.strip())
-
-    interval = cli.execution_interval or int(os.getenv("EXECUTION_INTERVAL_MINUTES", "5"))
-
-    return Settings(
-        qs_api_key=os.environ["QUANTUMSIGNALS_API_KEY"],
-        dry_run=os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes"),
-        broker=os.getenv("BROKER", "alpaca").lower(),
-        strategy=os.getenv("STRATEGY", "momentum").lower(),
-        allowed_symbols=allowed,
-        close_on_exit=os.getenv("CLOSE_ON_EXIT", "true").lower() in ("true", "1", "yes"),
-        daily_start_capital=float(os.getenv("DAILY_START_CAPITAL", "100000")),
-        signal_queue_maxsize=int(os.getenv("SIGNAL_QUEUE_MAXSIZE", "0")),
-        execution_interval_minutes=interval,
-        session_end_time=os.getenv("SESSION_END_TIME", "15:55"),
-        session_start_time=os.getenv("SESSION_START_TIME", "09:30"),
-        session_timezone=os.getenv("SESSION_TIMEZONE", "America/New_York"),
-        run_days=int(os.getenv("RUN_DAYS", "0")),
-    )
+    overrides: dict[str, object] = {}
+    if cli.execution_interval is not None:
+        overrides["execution_interval_minutes"] = cli.execution_interval
+    return Settings(**overrides)
