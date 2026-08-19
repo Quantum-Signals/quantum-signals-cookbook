@@ -3,32 +3,21 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from dataclasses import dataclass, field
 
-from dotenv import load_dotenv
+from typing import Annotated
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
-# Roll `lastTradeDateOrContractMonth` to the active front month or IB may fail/hang on qualify.
-_DEFAULT_SYMBOL_MAP: dict[str, dict] = {
-    "ES":   {"symbol": "ES",   "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "NQ":   {"symbol": "NQ",   "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "YM":   {"symbol": "YM",   "secType": "FUT", "exchange": "CBOT",  "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "RTY":  {"symbol": "RTY",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "CL":   {"symbol": "CL",   "secType": "FUT", "exchange": "NYMEX", "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "GC":   {"symbol": "GC",   "secType": "FUT", "exchange": "COMEX", "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "MES":  {"symbol": "MES",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "MNQ":  {"symbol": "MNQ",  "secType": "FUT", "exchange": "CME",   "currency": "USD", "lastTradeDateOrContractMonth": "202606"},
-    "AAPL": {"symbol": "AAPL", "secType": "STK", "exchange": "SMART", "currency": "USD"},
-    "SPY":  {"symbol": "SPY",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
-    "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
-}
+# Symbol → broker-native contract mapping lives with each broker that owns it
+# (each broker encodes symbols differently): see AlpacaBroker.DEFAULT_SYMBOL_MAP
+# (QS → ETF ticker) and SimulatedBroker.DEFAULT_SYMBOL_MAP / DEFAULT_PRICES.
+# Contract multipliers are
+# broker-neutral PnL math (used by the app's EOD flatten) and stay here.
 
-_DEFAULT_SIM_PRICES: dict[str, float] = {
-    "ES": 5450.00, "NQ": 19200.00, "YM": 42500.00, "RTY": 2050.00,
-    "MES": 5450.00, "MNQ": 19200.00,
-    "CL": 68.50, "GC": 2350.00, "AAPL": 218.50, "SPY": 545.00, "QQQ": 470.00,
-}
-
+# Point-value per contract, used for end-of-day PnL in app.py. Futures carry a
+# contract multiplier; equities/ETFs are 1:1.
 _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
     "ES": 50.0, "NQ": 20.0, "YM": 5.0, "RTY": 50.0,
     "MES": 5.0, "MNQ": 2.0,
@@ -36,25 +25,39 @@ _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
 }
 
 
-@dataclass(frozen=True)
-class Settings:
-    qs_api_key: str
+class Settings(BaseSettings):
+    """App-level (orchestration) settings, loaded from ``TRADER_*`` env vars.
+
+    Broker connection settings and credentials are **not** here — each broker
+    package owns and self-loads its own config from its own namespaced env vars
+    (e.g. ``ALPACA_*``). This object only decides *which* broker to run
+    (``dry_run`` / ``broker``) and drives the session/strategy layer.
+
+    Env var names carry a ``TRADER_`` prefix (e.g. ``TRADER_DRY_RUN``), except
+    ``qs_api_key`` which reads the QuantumSignals client's own
+    ``QUANTUMSIGNALS_API_KEY`` convention (unprefixed).
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="TRADER_",
+        env_file=".env",
+        extra="ignore",
+        frozen=True,
+    )
+
+    # QuantumSignals API key — unprefixed, matching the QS client library's
+    # own env var. Required.
+    qs_api_key: str = Field(validation_alias="QUANTUMSIGNALS_API_KEY")
     dry_run: bool = True
-    # Broker selection: "ibkr" (default) or "alpaca"
+    # Broker selection: "alpaca" (default). The broker's own connection
+    # settings live in its package (e.g. AlpacaSettings).
     broker: str = "alpaca"
-    # IBKR connection settings
-    ib_host: str = "127.0.0.1"
-    ib_port: int = 4002
-    ib_client_id: int = 1
-    ib_market_data_type: int = 4  # 1=live, 3=delayed, 4=delayed-frozen
-    # Alpaca credentials
-    alpaca_api_key: str = ""
-    alpaca_secret_key: str = ""
-    alpaca_paper: bool = True
-    use_market_orders: bool = True
     max_stream_retries: int = 5
     strategy: str = "momentum"  # "momentum" or "signal_follower"
-    allowed_symbols: tuple[str, ...] = ()  # empty = allow all
+    # Comma-separated in the env var (``TRADER_ALLOWED_SYMBOLS=ES,NQ``); empty =
+    # allow all. NoDecode keeps the raw string so ``_split_symbols`` handles it
+    # instead of pydantic-settings trying to JSON-decode a list.
+    allowed_symbols: Annotated[list[str], NoDecode] = []
     close_on_exit: bool = True
     daily_start_capital: float = 1_000_000.0
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
@@ -74,9 +77,24 @@ class Settings:
     #   1 = single-day mode (legacy behaviour: exit after first EOD).
     #   N = exit after N EODs.
     run_days: int = 0
-    symbol_map: dict[str, dict] = field(default_factory=lambda: dict(_DEFAULT_SYMBOL_MAP))
-    sim_prices: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_SIM_PRICES))
-    contract_multipliers: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_CONTRACT_MULTIPLIERS))
+    # Broker-neutral PnL math; not env-driven.
+    contract_multipliers: dict[str, float] = Field(
+        default_factory=lambda: dict(_DEFAULT_CONTRACT_MULTIPLIERS),
+        exclude=True,
+    )
+
+    @field_validator("broker", "strategy", mode="before")
+    @classmethod
+    def _lowercase(cls, v: object) -> object:
+        return v.lower() if isinstance(v, str) else v
+
+    @field_validator("allowed_symbols", mode="before")
+    @classmethod
+    def _split_symbols(cls, v: object) -> object:
+        """Accept a comma-separated string (``"ES,NQ"``) or a list."""
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
 
 
 def _parse_cli_args() -> argparse.Namespace:
@@ -103,36 +121,14 @@ def _parse_cli_args() -> argparse.Namespace:
 
 
 def load_settings() -> Settings:
-    """Load settings from environment variables, .env file, and CLI args."""
-    load_dotenv()
+    """Load settings from ``TRADER_*`` env vars, the ``.env`` file, and CLI args.
+
+    The ``--execution-interval`` CLI flag, when given, overrides
+    ``TRADER_EXECUTION_INTERVAL_MINUTES`` — constructor args take precedence over
+    env values in pydantic-settings.
+    """
     cli = _parse_cli_args()
-
-    raw_symbols = os.getenv("ALLOWED_SYMBOLS", "").strip()
-    allowed: tuple[str, ...] = ()
-    if raw_symbols:
-        allowed = tuple(s.strip() for s in raw_symbols.split(",") if s.strip())
-
-    interval = cli.execution_interval or int(os.getenv("EXECUTION_INTERVAL_MINUTES", "5"))
-
-    return Settings(
-        qs_api_key=os.environ["QUANTUMSIGNALS_API_KEY"],
-        dry_run=os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes"),
-        broker=os.getenv("BROKER", "alpaca").lower(),
-        ib_host=os.getenv("IB_HOST", "127.0.0.1"),
-        ib_port=int(os.getenv("IB_PORT", "4002")),
-        ib_client_id=int(os.getenv("IB_CLIENT_ID", "1")),
-        ib_market_data_type=int(os.getenv("IB_MARKET_DATA_TYPE", "4")),
-        alpaca_api_key=os.getenv("ALPACA_API_KEY", ""),
-        alpaca_secret_key=os.getenv("ALPACA_SECRET_KEY", ""),
-        alpaca_paper=os.getenv("ALPACA_PAPER", "true").lower() in ("true", "1", "yes"),
-        strategy=os.getenv("STRATEGY", "momentum").lower(),
-        allowed_symbols=allowed,
-        close_on_exit=os.getenv("CLOSE_ON_EXIT", "true").lower() in ("true", "1", "yes"),
-        daily_start_capital=float(os.getenv("DAILY_START_CAPITAL", "100000")),
-        signal_queue_maxsize=int(os.getenv("SIGNAL_QUEUE_MAXSIZE", "0")),
-        execution_interval_minutes=interval,
-        session_end_time=os.getenv("SESSION_END_TIME", "15:55"),
-        session_start_time=os.getenv("SESSION_START_TIME", "09:30"),
-        session_timezone=os.getenv("SESSION_TIMEZONE", "America/New_York"),
-        run_days=int(os.getenv("RUN_DAYS", "0")),
-    )
+    overrides: dict[str, object] = {}
+    if cli.execution_interval is not None:
+        overrides["execution_interval_minutes"] = cli.execution_interval
+    return Settings(**overrides)

@@ -11,7 +11,11 @@ wheels/
 
 # Secrets
 .env
+.envrc
 
 # Logs
 logs/
 *.ipynb
+
+# Debugging
+sync.sh

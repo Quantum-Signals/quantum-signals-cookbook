@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time as dt_time, timezone
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 from loguru import logger
 
 from trader.config import Settings
-from trader.gateways.base import GatewayBase
+from qs_trader_broker_core import BrokerBase
 from trader.models import PerformanceTracker, Signal, sig_label
 from trader.strategy.base import StrategyBase
 
@@ -49,11 +48,11 @@ class SignalFollowerStrategy(StrategyBase):
 
     def __init__(
         self,
-        gw: GatewayBase,
+        broker: BrokerBase,
         perf: PerformanceTracker,
         settings: Settings,
     ) -> None:
-        self.gw = gw
+        self.broker = broker
         self.perf = perf
         self._settings = settings
 
@@ -210,7 +209,7 @@ class SignalFollowerStrategy(StrategyBase):
     # ------------------------------------------------------------------
     def _close_stale_positions(self, context: str) -> None:
         """Query the broker for existing positions and close them."""
-        pos_list = self.gw.get_positions_for_sync()
+        pos_list = self.broker.get_positions_for_sync()
         if not pos_list:
             logger.info(f"[{context}] No existing positions at broker — clean slate")
             return
@@ -223,13 +222,13 @@ class SignalFollowerStrategy(StrategyBase):
             label = "LONG" if qty > 0 else "SHORT"
             logger.warning(f"  {label} {abs(qty)}x {sym} @ {avg_price:.2f}")
 
-            contract = self.gw.resolve_contract(sym)
+            contract = self.broker.resolve_contract(sym)
             if contract is None:
                 logger.error(f"  -> Cannot resolve contract for {sym} — manual close required")
                 continue
 
             action = "SELL" if qty > 0 else "BUY"
-            self.gw.place_order(contract, action, abs(qty))
+            self.broker.place_order(contract, action, abs(qty))
             logger.info(f"  -> Closed stale {label} {abs(qty)}x {sym}")
 
     # ------------------------------------------------------------------
@@ -238,23 +237,23 @@ class SignalFollowerStrategy(StrategyBase):
     def _open_incremental(self, sym: str, direction: Signal) -> None:
         """Trade 1 share on the mapped ETF for each signal."""
         trade_sym = _SIGNAL_TO_TRADE.get(sym, sym)
-        contract = self.gw.resolve_contract(trade_sym)
+        contract = self.broker.resolve_contract(trade_sym)
         if contract is None:
             logger.warning(f"  -> No tradable contract for {trade_sym} — skipping")
             return
 
         action = "BUY" if direction == Signal.UP else "SELL"
 
-        trade = self.gw.place_order(contract, action, 1)
+        trade = self.broker.place_order(contract, action, 1)
         if trade is None:
             return
 
         signed = 1 if action == "BUY" else -1
         self._net_qty[sym] = self._net_qty.get(sym, 0) + signed
 
-        fill_price = _extract_fill_price(trade)
+        fill_price = trade.price
         if fill_price is None:
-            fill_price = self.gw.get_last_price(contract)
+            fill_price = self.broker.get_last_price(contract)
         if fill_price is None:
             logger.warning(
                 f"  -> {action} 1x {trade_sym} — fill price unknown, "
@@ -276,7 +275,7 @@ class SignalFollowerStrategy(StrategyBase):
             return
 
         trade_sym = _SIGNAL_TO_TRADE.get(sym, sym)
-        contract = self.gw.resolve_contract(trade_sym)
+        contract = self.broker.resolve_contract(trade_sym)
         if contract is None:
             logger.warning(f"  -> Cannot close {trade_sym} — no tradable contract")
             return
@@ -284,7 +283,7 @@ class SignalFollowerStrategy(StrategyBase):
         action = "SELL" if net > 0 else "BUY"
         abs_qty = abs(net)
 
-        trade = self.gw.place_order(contract, action, abs_qty)
+        trade = self.broker.place_order(contract, action, abs_qty)
         if trade is None:
             return
 
@@ -294,9 +293,9 @@ class SignalFollowerStrategy(StrategyBase):
         self._total_cost[sym] = 0.0
         self._active_decision.pop(sym, None)
 
-        fill_price = _extract_fill_price(trade)
+        fill_price = trade.price
         if fill_price is None:
-            fill_price = self.gw.get_last_price(contract)
+            fill_price = self.broker.get_last_price(contract)
         if fill_price is None:
             logger.warning(f"  -> No fill price closing {trade_sym} — PnL not recorded")
             return
@@ -322,33 +321,6 @@ class SignalFollowerStrategy(StrategyBase):
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-
-def _extract_fill_price(trade_ref: object) -> Optional[float]:
-    """Get the actual execution price from a trade/order result.
-
-    Works with both ib_async Trade objects (orderStatus.avgFillPrice)
-    and SimulatedGateway dicts ({"price": ...}).
-    """
-    if isinstance(trade_ref, dict):
-        p = trade_ref.get("price")
-        if p is not None and p > 0:
-            return float(p)
-        return None
-
-    status = getattr(trade_ref, "orderStatus", None)
-    if status is not None:
-        avg = getattr(status, "avgFillPrice", 0.0)
-        if avg and avg > 0:
-            return float(avg)
-
-    fills = getattr(trade_ref, "fills", None)
-    if fills:
-        prices = [f.execution.avgPrice for f in fills if getattr(f, "execution", None)]
-        if prices:
-            return sum(prices) / len(prices)
-
-    return None
-
 
 def _to_eastern(for_minute_utc: object) -> datetime:
     """Convert the signal's UTC timestamp to Eastern Time."""

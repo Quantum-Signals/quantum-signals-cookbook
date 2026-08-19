@@ -17,10 +17,10 @@ def stream_signals_thread(
 ) -> None:
     """Read QuantumSignals SSE events and enqueue them for the main thread.
 
-    ib_async must run API calls (connect already ran on main) on the **same**
-    thread as that event loop. This thread only performs I/O to the QS stream
-    and enqueues ``signal`` objects; the main thread drains ``signal_queue``
-    and runs the strategy.
+    This thread only performs I/O to the QS stream and enqueues ``signal``
+    objects; the main thread drains ``signal_queue`` and runs the strategy. All
+    broker calls stay on the main thread — a broker may require thread affinity
+    (e.g. an SDK bound to the event loop of the thread that connected it).
 
     Retries with exponential backoff on transient errors.
     """

@@ -10,16 +10,11 @@ resolution-markers = [
     "python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
-[[package]]
-name = "aeventkit"
-version = "2.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5c/8c/c08db1a1910f8d04ec6a524de522edd0bac181bdf94dbb01183f7685cd77/aeventkit-2.1.0.tar.gz", hash = "sha256:4e7d81bb0a67227121da50a23e19e5bbf13eded541a9f4857eeb6b7b857b738a", size = 24703, upload-time = "2025-06-22T15:54:03.961Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8d/8c/2a4b912b1afa201b25bdd0f5bccf96d5a8b5dccb6131316a8dd2d9cabcc1/aeventkit-2.1.0-py3-none-any.whl", hash = "sha256:962d43f79e731ac43527f2d0defeed118e6dbaa85f1487f5667540ebb8f00729", size = 26678, upload-time = "2025-06-22T15:54:02.141Z" },
+[manifest]
+members = [
+    "live-trader",
+    "qs-trader-broker-alpaca",
+    "qs-trader-broker-core",
 ]
 
 [[package]]
@@ -323,20 +318,6 @@ wheels = [
 ]
 
 [[package]]
-name = "ib-async"
-version = "2.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aeventkit" },
-    { name = "nest-asyncio" },
-    { name = "tzdata" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/30/4d/dfc1da8224c3ffcdcd668da7283c4e5f14239a07f83ea66af99700296fc3/ib_async-2.1.0.tar.gz", hash = "sha256:6a03a87d6c06acacb0217a5bea60a8a168ecd5b5a7e86e1c73678d5b48cbc796", size = 87678, upload-time = "2025-12-08T01:42:32.004Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/80/e7/8f33801788c66f15e9250957ff7f53a8000843f79af1a3ed7a96def0e96b/ib_async-2.1.0-py3-none-any.whl", hash = "sha256:f6d8b991bdbd6dd38e700c61b3dced06ebe0f14be4e5263e2ef10ba10b88d434", size = 88876, upload-time = "2025-12-08T01:42:30.883Z" },
-]
-
-[[package]]
 name = "idna"
 version = "3.11"
 source = { registry = "https://pypi.org/simple" }
@@ -457,10 +438,11 @@ name = "live-trader"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "alpaca-py" },
-    { name = "ib-async" },
     { name = "loguru" },
+    { name = "pydantic-settings" },
     { name = "python-dotenv" },
+    { name = "qs-trader-broker-alpaca" },
+    { name = "qs-trader-broker-core" },
     { name = "quantumsignals-client" },
 ]
 
@@ -472,10 +454,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "alpaca-py", specifier = ">=0.29.0" },
-    { name = "ib-async", specifier = ">=2.0.0" },
     { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "qs-trader-broker-alpaca", editable = "src/brokers/alpaca" },
+    { name = "qs-trader-broker-core", editable = "src/brokers/core" },
     { name = "quantumsignals-client", specifier = ">=0.6.0" },
 ]
 
@@ -987,6 +970,40 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c4/59/a5f38970f9bf07cee96128de79590bb354917914a9be11272cfc7ff26af0/pyzmq-27.1.0-cp314-cp314t-win32.whl", hash = "sha256:1f0b2a577fd770aa6f053211a55d1c47901f4d537389a034c690291485e5fe92", size = 587472, upload-time = "2025-09-08T23:08:58.18Z" },
     { url = "https://files.pythonhosted.org/packages/70/d8/78b1bad170f93fcf5e3536e70e8fadac55030002275c9a29e8f5719185de/pyzmq-27.1.0-cp314-cp314t-win_amd64.whl", hash = "sha256:19c9468ae0437f8074af379e986c5d3d7d7bfe033506af442e8c879732bedbe0", size = 661401, upload-time = "2025-09-08T23:08:59.802Z" },
     { url = "https://files.pythonhosted.org/packages/81/d6/4bfbb40c9a0b42fc53c7cf442f6385db70b40f74a783130c5d0a5aa62228/pyzmq-27.1.0-cp314-cp314t-win_arm64.whl", hash = "sha256:dc5dbf68a7857b59473f7df42650c621d7e8923fb03fa74a526890f4d33cc4d7", size = 575170, upload-time = "2025-09-08T23:09:01.418Z" },
+]
+
+[[package]]
+name = "qs-trader-broker-alpaca"
+version = "0.1.0"
+source = { editable = "src/brokers/alpaca" }
+dependencies = [
+    { name = "alpaca-py" },
+    { name = "loguru" },
+    { name = "pydantic-settings" },
+    { name = "qs-trader-broker-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alpaca-py", specifier = ">=0.29.0" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "qs-trader-broker-core", editable = "src/brokers/core" },
+]
+
+[[package]]
+name = "qs-trader-broker-core"
+version = "0.1.0"
+source = { editable = "src/brokers/core" }
+dependencies = [
+    { name = "loguru" },
+    { name = "pydantic-settings" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pydantic-settings", specifier = ">=2.0" },
 ]
 
 [[package]]

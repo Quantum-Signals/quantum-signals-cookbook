@@ -9,18 +9,8 @@ services:
     env_file:
       - .env
 
-    environment:
-      # When BROKER=ibkr, the IB Gateway/TWS runs on the host machine.
-      # Docker for Mac/Windows can reach it via host.docker.internal.
-      # On Linux, either use network_mode: host (see below) or set
-      # IB_HOST to the host's LAN IP.
-      IB_HOST: ${IB_HOST:-host.docker.internal}
-
     volumes:
       # Persist daily log files on the host
       - ./logs:/app/logs
 
     restart: unless-stopped
-
-    # Uncomment on Linux if IB Gateway runs on the same machine:
-    # network_mode: host

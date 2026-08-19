@@ -10,13 +10,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from loguru import logger
 from quantumsignals.client import Client as QSClient
 from trader.config import Settings, load_settings
-from trader.gateways import create_gateway
-from trader.gateways.base import GatewayBase
+from trader.brokers import create_broker
+from qs_trader_broker_core import BrokerBase
 from trader.models import PerformanceTracker
 from trader.reporting import report_once
 from trader.strategy.base import StrategyBase
 from trader.strategy.momentum import MomentumStrategy
-from trader.strategy.signal_follower import SignalFollowerStrategy, _extract_fill_price
+from trader.strategy.signal_follower import SignalFollowerStrategy
 from trader.streaming import stream_signals_thread
 
 _STRATEGIES = {
@@ -191,7 +191,7 @@ def _log_model_catalog(settings: Settings) -> None:
 
 
 def _close_all_positions(
-    gw: GatewayBase,
+    broker: BrokerBase,
     settings: Settings,
     perf: PerformanceTracker,
 ) -> float:
@@ -204,7 +204,7 @@ def _close_all_positions(
 
     exit_pnl = 0.0
     try:
-        pos_list = gw.get_positions_for_sync()
+        pos_list = broker.get_positions_for_sync()
         if not pos_list:
             logger.info("No open positions to close")
             return 0.0
@@ -220,17 +220,17 @@ def _close_all_positions(
             label = "LONG" if qty > 0 else "SHORT"
             logger.warning(f"  {label} {abs(qty)}x {sym} @ {avg_price:.2f}")
 
-            contract = gw.resolve_contract(sym)
+            contract = broker.resolve_contract(sym)
             if contract is None:
                 logger.error(f"  -> Cannot resolve contract for {sym} — manual close required")
                 continue
 
             action = "SELL" if qty > 0 else "BUY"
-            trade = gw.place_order(contract, action, abs(qty))
+            trade = broker.place_order(contract, action, abs(qty))
 
-            fill_price = _extract_fill_price(trade) if trade else None
+            fill_price = trade.price if trade else None
             if fill_price is None:
-                fill_price = gw.get_last_price(contract)
+                fill_price = broker.get_last_price(contract)
 
             if fill_price is not None:
                 multiplier = settings.contract_multipliers.get(sym, 1.0)
@@ -256,7 +256,7 @@ def _close_all_positions(
 def _run_trading_day(
     eod_dt: datetime,
     tz: ZoneInfo,
-    gw: GatewayBase,
+    broker: BrokerBase,
     strategy: StrategyBase,
     perf: PerformanceTracker,
     settings: Settings,
@@ -299,7 +299,7 @@ def _run_trading_day(
             next_tick_at = now_mono + tick_interval_s
 
         if now_mono >= next_report_at:
-            report_once(gw, perf)
+            report_once(broker, perf)
             next_report_at = now_mono + report_interval_s
 
         if datetime.now(tz) >= eod_dt:
@@ -402,13 +402,13 @@ def main() -> None:
 
     perf = PerformanceTracker()
     stop_event = threading.Event()
-    gw = create_gateway(settings)
+    broker = create_broker(settings)
 
     maxsize = settings.signal_queue_maxsize if settings.signal_queue_maxsize > 0 else 0
     signal_queue: queue.Queue = queue.Queue(maxsize=maxsize)
 
     try:
-        gw.connect()
+        broker.connect()
     except Exception as exc:
         logger.critical(f"Cannot connect to broker: {exc}")
         _close_day_log(day_log_id)
@@ -424,7 +424,7 @@ def main() -> None:
         )
         _close_day_log(day_log_id)
         sys.exit(1)
-    strategy = strategy_cls(gw, perf, settings)
+    strategy = strategy_cls(broker, perf, settings)
     strategy.sync_positions()
 
     qs_thread = threading.Thread(
@@ -484,13 +484,13 @@ def main() -> None:
                 logger.warning(f"Pre-session position re-sync failed: {exc}")
 
             reached_eod = _run_trading_day(
-                eod_dt, tz, gw, strategy, perf, settings, stop_event, signal_queue
+                eod_dt, tz, broker, strategy, perf, settings, stop_event, signal_queue
             )
 
             intraday_pnl = perf.gross_pnl
             exit_pnl = 0.0
             if settings.close_on_exit:
-                exit_pnl = _close_all_positions(gw, settings, perf)
+                exit_pnl = _close_all_positions(broker, settings, perf)
 
             _log_day_summary(trading_day, perf, intraday_pnl, exit_pnl, settings)
 
@@ -523,7 +523,7 @@ def main() -> None:
         intraday_pnl = perf.gross_pnl
         exit_pnl = 0.0
         if settings.close_on_exit:
-            exit_pnl = _close_all_positions(gw, settings, perf)
+            exit_pnl = _close_all_positions(broker, settings, perf)
 
         if perf.gross_pnl != 0.0 or perf.total_trades > 0 or exit_pnl != 0.0:
             _log_day_summary(
@@ -546,6 +546,6 @@ def main() -> None:
             settings,
             shutdown_reason,
         )
-        gw.disconnect()
+        broker.disconnect()
         logger.info("Goodbye.")
         _close_day_log(day_log_id)

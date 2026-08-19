@@ -1,15 +1,17 @@
 from dataclasses import dataclass
 
 from trader.config import Settings
-from trader.gateways.simulated import SimulatedGateway
+from qs_trader_broker_core import SimulatedBroker, SimulatedSettings
 from trader.models import PerformanceTracker, Signal
 from trader.strategy.signal_follower import SignalFollowerStrategy
 
 
 def _make_settings(**overrides) -> Settings:
+    # _env_file=None isolates tests from a developer's local .env so ambient
+    # TRADER_* values (e.g. ALLOWED_SYMBOLS) can't leak into fixtures.
     defaults = dict(qs_api_key="test-key", dry_run=True)
     defaults.update(overrides)
-    return Settings(**defaults)
+    return Settings(_env_file=None, **defaults)
 
 
 @dataclass
@@ -36,15 +38,16 @@ def _make_strategy(**settings_kw):
     from datetime import date
 
     settings = _make_settings(**settings_kw)
-    gw = SimulatedGateway(settings)
-    gw.connect()
+    # price_jitter=0.0 → deterministic prices so order sizing is reproducible.
+    broker = SimulatedBroker(SimulatedSettings(price_jitter=0.0))
+    broker.connect()
     perf = PerformanceTracker()
-    strategy = SignalFollowerStrategy(gw, perf, settings)
+    strategy = SignalFollowerStrategy(broker, perf, settings)
 
     strategy._current_date = date(2026, 4, 14)
     strategy._pre_market_done = True
 
-    return strategy, gw, perf
+    return strategy, broker, perf
 
 
 def _utc_ts(hour_et: int, minute_et: int) -> str:
@@ -59,42 +62,42 @@ def _utc_ts(hour_et: int, minute_et: int) -> str:
 
 class TestSignalFollowerBasic:
     def test_null_signal_ignored(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=1, _null=True))
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
         assert perf.total_trades == 0
 
     def test_outside_hours_ignored(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 8))
         )
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
 
     def test_decision_at_boundary_opens_position(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         assert len(positions) == 1
         assert positions[0]["pos"] > 0
 
     def test_decision_down_opens_short(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.DOWN, for_minute_utc=_utc_ts(9, 45))
         )
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         assert len(positions) == 1
         assert positions[0]["pos"] < 0
 
     def test_stable_at_boundary_pauses(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.STABLE, for_minute_utc=_utc_ts(9, 45))
         )
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
 
 
 # =====================================================================
@@ -103,17 +106,17 @@ class TestSignalFollowerBasic:
 
 class TestSignalFollowerAccumulation:
     def test_accumulates_over_5min_window(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         for minute in range(45, 50):
             strategy.handle_signal(
                 FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, minute))
             )
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         assert len(positions) == 1
         assert positions[0]["pos"] == 5
 
     def test_new_decision_at_next_boundary(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         for minute in range(45, 50):
             strategy.handle_signal(
                 FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, minute))
@@ -122,27 +125,27 @@ class TestSignalFollowerAccumulation:
             strategy.handle_signal(
                 FakeSignal(symbol="ES", signal=Signal.DOWN, for_minute_utc=_utc_ts(9, minute))
             )
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         assert len(positions) == 0
 
     def test_no_action_between_decisions_without_active(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 46))
         )
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
 
     def test_carries_decision_across_non_boundary_minutes(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.DOWN, for_minute_utc=_utc_ts(10, 0))
         )
-        assert gw.get_open_positions()[0]["pos"] == -1
+        assert broker.get_open_positions()[0]["pos"] == -1
         for minute in range(1, 5):
             strategy.handle_signal(
                 FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(10, minute))
             )
-        assert gw.get_open_positions()[0]["pos"] == -5
+        assert broker.get_open_positions()[0]["pos"] == -5
 
 
 # =====================================================================
@@ -151,41 +154,41 @@ class TestSignalFollowerAccumulation:
 
 class TestSignalFollowerFlatten:
     def test_flatten_closes_long(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         for minute in range(45, 50):
             strategy.handle_signal(
                 FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, minute))
             )
-        assert gw.get_open_positions()[0]["pos"] == 5
+        assert broker.get_open_positions()[0]["pos"] == 5
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(15, 55))
         )
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
         assert perf.total_trades == 1
 
     def test_flatten_closes_short(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         for minute in range(45, 50):
             strategy.handle_signal(
                 FakeSignal(symbol="ES", signal=Signal.DOWN, for_minute_utc=_utc_ts(9, minute))
             )
-        assert gw.get_open_positions()[0]["pos"] == -5
+        assert broker.get_open_positions()[0]["pos"] == -5
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.DOWN, for_minute_utc=_utc_ts(15, 56))
         )
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
         assert perf.total_trades == 1
 
     def test_flatten_noop_when_flat(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(15, 55))
         )
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
         assert perf.total_trades == 0
 
     def test_flatten_pnl_uses_multiplier(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
@@ -201,20 +204,20 @@ class TestSignalFollowerFlatten:
 
 class TestSignalFollowerMultiSymbol:
     def test_independent_symbols(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
         strategy.handle_signal(
             FakeSignal(symbol="NQ", signal=Signal.DOWN, for_minute_utc=_utc_ts(9, 45))
         )
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         by_sym = {p["symbol"]: p["pos"] for p in positions}
         assert by_sym["SPY"] > 0
         assert by_sym["QQQ"] < 0
 
     def test_flatten_only_closes_symbol_in_window(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
@@ -224,7 +227,7 @@ class TestSignalFollowerMultiSymbol:
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(15, 55))
         )
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         symbols = {p["symbol"] for p in positions}
         assert "SPY" not in symbols
         assert "QQQ" in symbols
@@ -236,7 +239,7 @@ class TestSignalFollowerMultiSymbol:
 
 class TestSignalFollowerDayReset:
     def test_new_day_resets_net_qty_and_computes_sizing(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
@@ -252,7 +255,7 @@ class TestSignalFollowerDayReset:
         assert strategy._current_date.day == 15
 
     def test_daily_pnl_resets_on_new_day(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         for minute in range(45, 50):
             strategy.handle_signal(
                 FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, minute))
@@ -277,15 +280,15 @@ class TestSignalFollowerDayReset:
 
 class TestSignalFollowerGapWindow:
     def test_gap_between_trading_and_close_is_quiet(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
-        assert gw.get_open_positions()[0]["pos"] == 1
+        assert broker.get_open_positions()[0]["pos"] == 1
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(15, 40))
         )
-        assert gw.get_open_positions()[0]["pos"] == 1
+        assert broker.get_open_positions()[0]["pos"] == 1
 
 
 # =====================================================================
@@ -294,7 +297,7 @@ class TestSignalFollowerGapWindow:
 
 class TestSignalFollowerSymbolFilter:
     def test_allowed_symbols_filter(self):
-        strategy, gw, perf = _make_strategy(allowed_symbols=("ES", "NQ"))
+        strategy, broker, perf = _make_strategy(allowed_symbols=["ES", "NQ"])
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
@@ -304,18 +307,18 @@ class TestSignalFollowerSymbolFilter:
         strategy.handle_signal(
             FakeSignal(symbol="NQ", signal=Signal.DOWN, for_minute_utc=_utc_ts(9, 45))
         )
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         symbols = {p["symbol"] for p in positions}
         assert "SPY" in symbols
         assert "QQQ" in symbols
         assert "YM" not in symbols
 
     def test_empty_allowed_means_all(self):
-        strategy, gw, perf = _make_strategy(allowed_symbols=())
+        strategy, broker, perf = _make_strategy(allowed_symbols=[])
         strategy.handle_signal(
             FakeSignal(symbol="YM", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
-        assert len(gw.get_open_positions()) == 1
+        assert len(broker.get_open_positions()) == 1
 
 
 # =====================================================================
@@ -325,46 +328,46 @@ class TestSignalFollowerSymbolFilter:
 class TestPreMarketCleanup:
     def test_sync_positions_closes_existing(self):
         settings = _make_settings()
-        gw = SimulatedGateway(settings)
-        gw.connect()
-        contract = gw.resolve_contract("ES")
-        gw.place_order(contract, "BUY", 3, 5450.0)
-        assert len(gw.get_open_positions()) == 1
+        broker = SimulatedBroker(SimulatedSettings(price_jitter=0.0))
+        broker.connect()
+        contract = broker.resolve_contract("ES")
+        broker.place_order(contract, "BUY", 3, 5450.0)
+        assert len(broker.get_open_positions()) == 1
 
         perf = PerformanceTracker()
-        strategy = SignalFollowerStrategy(gw, perf, settings)
+        strategy = SignalFollowerStrategy(broker, perf, settings)
         strategy.sync_positions()
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
 
     def test_pre_market_cleanup_on_first_signal(self):
         settings = _make_settings()
-        gw = SimulatedGateway(settings)
-        gw.connect()
-        contract = gw.resolve_contract("NQ")
-        gw.place_order(contract, "SELL", 2, 19200.0)
-        assert gw.get_open_positions()[0]["pos"] == -2
+        broker = SimulatedBroker(SimulatedSettings(price_jitter=0.0))
+        broker.connect()
+        contract = broker.resolve_contract("NQ")
+        broker.place_order(contract, "SELL", 2, 19200.0)
+        assert broker.get_open_positions()[0]["pos"] == -2
 
         perf = PerformanceTracker()
-        strategy = SignalFollowerStrategy(gw, perf, settings)
+        strategy = SignalFollowerStrategy(broker, perf, settings)
 
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 20))
         )
-        nq_positions = [p for p in gw.get_open_positions() if p["symbol"] == "NQ"]
+        nq_positions = [p for p in broker.get_open_positions() if p["symbol"] == "NQ"]
         assert len(nq_positions) == 0
 
     def test_pre_market_cleanup_only_once_per_day(self):
-        strategy, gw, perf = _make_strategy()
+        strategy, broker, perf = _make_strategy()
         # _make_strategy already sets _pre_market_done=True.
         # Verify that trading proceeds normally without re-triggering cleanup.
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 45))
         )
-        assert gw.get_open_positions()[0]["pos"] == 1
+        assert broker.get_open_positions()[0]["pos"] == 1
 
         strategy.handle_signal(
             FakeSignal(symbol="ES", signal=Signal.UP, for_minute_utc=_utc_ts(9, 46))
         )
-        assert gw.get_open_positions()[0]["pos"] == 2
+        assert broker.get_open_positions()[0]["pos"] == 2
 
 

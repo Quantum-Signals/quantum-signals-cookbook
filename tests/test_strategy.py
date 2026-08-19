@@ -1,15 +1,17 @@
 from dataclasses import dataclass
 
 from trader.config import Settings
-from trader.gateways.simulated import SimulatedGateway
+from qs_trader_broker_core import SimulatedBroker, SimulatedSettings
 from trader.models import PerformanceTracker, Signal
 from trader.strategy.momentum import MomentumStrategy
 
 
 def _make_settings(**overrides) -> Settings:
+    # _env_file=None isolates tests from a developer's local .env so ambient
+    # TRADER_* values (e.g. ALLOWED_SYMBOLS) can't leak into fixtures.
     defaults = dict(qs_api_key="test-key", dry_run=True)
     defaults.update(overrides)
-    return Settings(**defaults)
+    return Settings(_env_file=None, **defaults)
 
 
 @dataclass
@@ -39,98 +41,96 @@ def _fire(strategy: MomentumStrategy, symbol: str, signal_value: int) -> None:
 class TestMomentumStrategy:
     def _make_strategy(self, **settings_kw):
         settings = _make_settings(**settings_kw)
-        gw = SimulatedGateway(settings)
-        gw.connect()
+        # price_jitter=0.0 → deterministic prices so order sizing is reproducible.
+        broker = SimulatedBroker(SimulatedSettings(price_jitter=0.0))
+        broker.connect()
         perf = PerformanceTracker()
-        strategy = MomentumStrategy(gw, perf, settings)
-        return strategy, gw, perf
+        strategy = MomentumStrategy(broker, perf, settings)
+        return strategy, broker, perf
 
     def test_null_signal_ignored(self):
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=1, _null=True))
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
         assert perf.total_trades == 0
 
     def test_up_signal_opens_long(self):
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         _fire(strategy, "ES", Signal.UP)
-        assert len(gw.get_open_positions()) == 1
-        pos = gw.get_open_positions()[0]
+        assert len(broker.get_open_positions()) == 1
+        pos = broker.get_open_positions()[0]
         assert pos["pos"] > 0
 
     def test_down_signal_opens_short(self):
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         _fire(strategy, "ES", Signal.DOWN)
-        assert len(gw.get_open_positions()) == 1
-        pos = gw.get_open_positions()[0]
+        assert len(broker.get_open_positions()) == 1
+        pos = broker.get_open_positions()[0]
         assert pos["pos"] < 0
 
     def test_stable_signal_no_position(self):
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         # STABLE with no position → no trade
         strategy._last_exec_time.clear()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.STABLE))
-        assert len(gw.get_open_positions()) == 0
+        assert len(broker.get_open_positions()) == 0
 
     def test_long_closed_on_down(self):
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         _fire(strategy, "ES", Signal.UP)
-        assert len(gw.get_open_positions()) == 1
+        assert len(broker.get_open_positions()) == 1
 
-        # Second DOWN reduces / closes the long.  The simulated gateway jitters
-        # the price ±0.1% on every get_last_price call, so the UP and DOWN
-        # slice sizes are computed at slightly different prices and don't cancel
-        # out to exactly zero shares.  We check near-flat (< 0.01 shares
-        # residual) rather than strict zero.
+        # Second DOWN closes the long. With deterministic sim prices
+        # (price_jitter=0.0) the UP and DOWN slices are the same size, so the
+        # net cancels to exactly flat.
         _fire(strategy, "ES", Signal.DOWN)
         spy_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
-        assert abs(spy_pos) < 0.01, (
-            f"Expected near-flat after UP+DOWN, got pos={spy_pos}"
+        assert spy_pos == 0.0, (
+            f"Expected flat after UP+DOWN, got pos={spy_pos}"
         )
 
     def test_long_closed_on_stable(self):
         # STABLE means "hold" — the long is kept, not closed.
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         _fire(strategy, "ES", Signal.UP)
         # Trigger STABLE via handle_signal (the proper path that enforces "hold")
         strategy._last_exec_time.clear()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.STABLE))
         spy_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
         assert spy_pos > 0, "Long should still be open after STABLE"
         assert perf.total_trades == 0  # no close yet
 
     def test_short_closed_on_up(self):
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         _fire(strategy, "ES", Signal.DOWN)
         _fire(strategy, "ES", Signal.UP)
-        # After DOWN then UP the short closes. Due to price jitter between the
-        # two signal evaluations the resulting net is near-flat but not always
-        # exactly zero. The key check: no significant short remains.
+        # After DOWN then UP the short closes. With deterministic sim prices the
+        # equal slices cancel to exactly flat.
         spy_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
-        assert spy_pos > -1.0, f"Expected near-flat after DOWN+UP, got {spy_pos}"
+        assert spy_pos == 0.0, f"Expected flat after DOWN+UP, got {spy_pos}"
         assert perf.total_trades == 1  # short trade was closed
 
     def test_short_closed_on_stable(self):
         # STABLE means "hold" — the short stays open.
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         _fire(strategy, "ES", Signal.DOWN)
         strategy._last_exec_time.clear()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.STABLE))
         spy_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
         assert spy_pos < 0, "Short should still be open after STABLE"
         assert perf.total_trades == 0  # no close yet
 
     def test_signal_ts_stamps_same_epoch(self):
         """Both symbols are stamped with the same epoch when signal_time_utc matches."""
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
 
         ts = "2026-01-01T19:08:00Z"
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP, signal_time_utc=ts))
@@ -153,7 +153,7 @@ class TestMomentumStrategy:
         The fix: key the cooldown on signal_time_utc (same for both symbols in
         the same QS bar) so the elapsed check is always identical.
         """
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
 
         ts1 = "2026-01-01T19:08:00Z"
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP, signal_time_utc=ts1))
@@ -167,25 +167,25 @@ class TestMomentumStrategy:
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP, signal_time_utc=ts2))
         strategy.handle_signal(FakeSignal(symbol="NQ", signal=Signal.UP, signal_time_utc=ts2))
 
-        symbols = {p["symbol"] for p in gw.get_open_positions()}
+        symbols = {p["symbol"] for p in broker.get_open_positions()}
         assert "SPY" in symbols, "ES/SPY must trade in cycle 2"
         assert "QQQ" in symbols, "NQ/QQQ must trade in cycle 2"
 
     def test_cooldown_blocks_rapid_trades(self):
         """The 5-minute execution interval prevents back-to-back handle_signal calls."""
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.UP))
         # A second handle_signal arriving immediately is within the 5-min window
         strategy.handle_signal(FakeSignal(symbol="ES", signal=Signal.DOWN))
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         assert len(positions) == 1
         assert positions[0]["pos"] > 0  # still long; DOWN was blocked by cooldown
 
     def test_multiple_symbols_independent(self):
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
         _fire(strategy, "ES", Signal.UP)
         _fire(strategy, "NQ", Signal.DOWN)
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         symbols = {p["symbol"] for p in positions}
         assert symbols == {"SPY", "QQQ"}
 
@@ -203,27 +203,26 @@ class TestMomentumStrategy:
           - Send N+2 DOWN signals → first N close the longs (flat),
             next 2 must open and grow a short
         """
-        strategy, gw, perf = self._make_strategy()
+        strategy, broker, perf = self._make_strategy()
 
         n_up = 5
         for _ in range(n_up):
             _fire(strategy, "S&P500", Signal.UP)
 
         # Confirm we have a long position
-        positions = gw.get_open_positions()
+        positions = broker.get_open_positions()
         assert any(p["pos"] > 0 for p in positions), "Expected a long after UP signals"
         long_qty = next(p["pos"] for p in positions if p["symbol"] == "SPY")
         assert long_qty > 0
 
-        # Send more DOWNs than UPs so we are guaranteed to clear all longs
-        # AND open a short. A small extra buffer covers price-jitter residuals:
-        # because slice sizes are computed from the live simulated price (which
-        # jitters ±0.1%), 5 DOWN slices don't always exactly cancel 5 UP slices.
-        n_down = n_up + 3  # plenty to clear longs + build a short
+        # Send more DOWNs than UPs so we clear all longs AND open a short:
+        # with deterministic prices the first n_up DOWN slices cancel the longs
+        # exactly, and the extra slices build the short.
+        n_down = n_up + 3  # clear longs + build a short
         for _ in range(n_down):
             _fire(strategy, "S&P500", Signal.DOWN)
 
-        positions_final = gw.get_open_positions()
+        positions_final = broker.get_open_positions()
         spy_pos_final = next(
             (p["pos"] for p in positions_final if p["symbol"] == "SPY"), 0.0
         )
@@ -234,8 +233,8 @@ class TestMomentumStrategy:
 
     def test_dust_long_to_short(self):
         """Regression: fractional dust at broker must not block sell_to_open."""
-        strategy, gw, perf = self._make_strategy(broker="alpaca")
-        gw._sim_positions["SPY"] = {"pos": 0.0001, "avg_cost": 745.0}
+        strategy, broker, perf = self._make_strategy(broker="alpaca")
+        broker._sim_positions["SPY"] = {"pos": 0.0001, "avg_cost": 745.0}
         strategy._net_qty["S&P500"] = 0.0001
         strategy._total_cost["S&P500"] = 0.0001 * 745.0
         strategy._position_reserve["S&P500"] = -0.5
@@ -243,7 +242,7 @@ class TestMomentumStrategy:
         _fire(strategy, "S&P500", Signal.DOWN)
 
         spy_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
         assert spy_pos < 0, (
             f"Expected short after dust long + DOWN, got pos={spy_pos}"
@@ -251,19 +250,19 @@ class TestMomentumStrategy:
 
     def test_long_to_short_crosses_zero(self):
         """Regression: long → short must use close then open, not one close order."""
-        strategy, gw, perf = self._make_strategy(broker="alpaca")
+        strategy, broker, perf = self._make_strategy(broker="alpaca")
 
         for _ in range(3):
             _fire(strategy, "S&P500", Signal.UP)
 
-        long_qty = next(p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY")
+        long_qty = next(p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY")
         assert long_qty > 0
 
         for _ in range(4):
             _fire(strategy, "S&P500", Signal.DOWN)
 
         spy_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
         assert spy_pos < 0, (
             f"Expected short after long unwound, got pos={spy_pos}"
@@ -271,8 +270,8 @@ class TestMomentumStrategy:
 
     def test_preserves_dust_after_unwind_to_flat(self):
         """Regression: broker dust after an unwind must not block the next short."""
-        strategy, gw, perf = self._make_strategy(broker="alpaca")
-        gw._sim_positions["SPY"] = {"pos": 0.0001, "avg_cost": 745.0}
+        strategy, broker, perf = self._make_strategy(broker="alpaca")
+        broker._sim_positions["SPY"] = {"pos": 0.0001, "avg_cost": 745.0}
         strategy._net_qty["S&P500"] = 0.0001
         strategy._total_cost["S&P500"] = 0.0001 * 745.0
         strategy._position_reserve["S&P500"] = -0.5
@@ -280,7 +279,7 @@ class TestMomentumStrategy:
         _fire(strategy, "S&P500", Signal.DOWN)
 
         spy_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
         assert spy_pos < 0, (
             f"Expected short when opening from preserved dust, got pos={spy_pos}"
@@ -292,22 +291,22 @@ class TestMomentumStrategy:
         fractional sell_to_open (Alpaca 42210000 "fractional orders cannot be
         sold short").
         """
-        strategy, gw, perf = self._make_strategy(
+        strategy, broker, perf = self._make_strategy(
             broker="alpaca",
             allowed_symbols=["ES"],
             daily_start_capital=50_000,
         )
         # Broker is flat for SPY, but strategy state drifted to a fractional long.
-        assert "SPY" not in gw._sim_positions
+        assert "SPY" not in broker._sim_positions
         strategy._net_qty["ES"] = 0.5
         strategy._total_cost["ES"] = 0.5 * 600.0
         strategy._position_reserve["ES"] = 0.0
 
         _fire(strategy, "ES", Signal.DOWN)
 
-        sell_orders = [o for o in gw._orders if o["action"] == "SELL"]
+        sell_orders = [o for o in broker._orders if o["action"] == "SELL"]
         assert len(sell_orders) == 1, (
-            f"Expected a single whole-share sell_to_open, got {gw._orders}"
+            f"Expected a single whole-share sell_to_open, got {broker._orders}"
         )
         assert sell_orders[0]["position_intent"] == "open"
         qty = float(sell_orders[0]["qty"])
@@ -315,7 +314,7 @@ class TestMomentumStrategy:
             f"Short open leg must be whole shares, got qty={qty}"
         )
         spy_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
         assert spy_pos < 0, f"Expected a short after DOWN flip, got pos={spy_pos}"
         assert abs(spy_pos - round(spy_pos)) < 1e-9, (
@@ -324,8 +323,8 @@ class TestMomentumStrategy:
 
     def test_june29_flat_strategy_broker_dust_to_short(self):
         """Regression: strategy flat + broker dust must close before sell_to_open."""
-        strategy, gw, perf = self._make_strategy(broker="alpaca")
-        gw._sim_positions["QQQ"] = {"pos": 0.000099994, "avg_cost": 716.0}
+        strategy, broker, perf = self._make_strategy(broker="alpaca")
+        broker._sim_positions["QQQ"] = {"pos": 0.000099994, "avg_cost": 716.0}
         strategy._net_qty["NQ"] = 0.0
         strategy._total_cost["NQ"] = 0.0
         strategy._position_reserve["NQ"] = -0.0489
@@ -333,7 +332,7 @@ class TestMomentumStrategy:
         _fire(strategy, "NQ", Signal.DOWN)
 
         qqq_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "QQQ"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "QQQ"), 0.0
         )
         assert qqq_pos < 0, (
             f"Expected short after flat strategy + broker dust, got pos={qqq_pos}"
@@ -341,36 +340,36 @@ class TestMomentumStrategy:
 
     def test_synced_short_up_covers_then_opens_long(self):
         """Regression: synced short + UP must buy_to_close then buy_to_open (July 2026)."""
-        strategy, gw, perf = self._make_strategy(
+        strategy, broker, perf = self._make_strategy(
             broker="alpaca",
             allowed_symbols=["ES"],
             daily_start_capital=1_000_000,
         )
-        gw._sim_positions["SPY"] = {"pos": -3.809, "avg_cost": 732.09}
+        broker._sim_positions["SPY"] = {"pos": -3.809, "avg_cost": 732.09}
         strategy.sync_positions()
 
         assert strategy._net_qty["ES"] == -3.809
         _fire(strategy, "ES", Signal.UP)
 
-        buy_orders = [o for o in gw._orders if o["action"] == "BUY"]
+        buy_orders = [o for o in broker._orders if o["action"] == "BUY"]
         assert len(buy_orders) == 2, (
-            f"Expected cover + open legs, got orders={gw._orders}"
+            f"Expected cover + open legs, got orders={broker._orders}"
         )
         assert buy_orders[0]["position_intent"] == "close"
         assert buy_orders[1]["position_intent"] == "open"
         spy_pos = next(
-            (p["pos"] for p in gw.get_open_positions() if p["symbol"] == "SPY"), 0.0
+            (p["pos"] for p in broker.get_open_positions() if p["symbol"] == "SPY"), 0.0
         )
         assert spy_pos > 0, f"Expected long after covering short, got pos={spy_pos}"
 
     def test_sell_capped_to_broker_long_when_strategy_ahead(self):
         """Regression: do not send uncapped sell when broker holds less long than bot."""
-        strategy, gw, perf = self._make_strategy(
+        strategy, broker, perf = self._make_strategy(
             broker="alpaca",
             allowed_symbols=["ES"],
             daily_start_capital=50_000,
         )
-        gw._sim_positions["SPY"] = {"pos": 3.809, "avg_cost": 732.09}
+        broker._sim_positions["SPY"] = {"pos": 3.809, "avg_cost": 732.09}
         strategy.sync_positions()
         # Drift: bot thinks it holds more long than the broker.
         strategy._net_qty["ES"] = 5.0
@@ -378,21 +377,21 @@ class TestMomentumStrategy:
 
         _fire(strategy, "ES", Signal.DOWN)
 
-        sell_orders = [o for o in gw._orders if o["action"] == "SELL"]
+        sell_orders = [o for o in broker._orders if o["action"] == "SELL"]
         assert len(sell_orders) >= 1
         assert sell_orders[0]["position_intent"] == "close"
         assert sell_orders[0]["qty"] <= 3.809 + 1e-4
 
     def test_sync_failure_preserves_state(self):
         """Regression: failed broker fetch must not wipe in-memory positions."""
-        strategy, gw, perf = self._make_strategy(broker="alpaca")
+        strategy, broker, perf = self._make_strategy(broker="alpaca")
         strategy._net_qty["ES"] = 5.0
         strategy._total_cost["ES"] = 500.0
 
         def _fail_sync():
             raise ConnectionError("network down")
 
-        gw.get_positions_for_sync = _fail_sync  # type: ignore[method-assign]
+        broker.get_positions_for_sync = _fail_sync  # type: ignore[method-assign]
 
         try:
             strategy.sync_positions()
@@ -406,7 +405,7 @@ class TestMomentumStrategy:
         """Regression: PositionSide str() is 'PositionSide.SHORT', not 'short'."""
         from alpaca.trading.enums import PositionSide
 
-        from trader.gateways.base import normalize_position_side
+        from qs_trader_broker_core import normalize_position_side
 
         assert normalize_position_side(PositionSide.SHORT) == "short"
         assert normalize_position_side(PositionSide.LONG) == "long"
@@ -415,15 +414,15 @@ class TestMomentumStrategy:
 
     def test_open_leg_not_oversized_cover_after_stale_short(self):
         """Regression: do not flip open leg to buy_to_close on stale short API."""
-        strategy, gw, perf = self._make_strategy(
+        strategy, broker, perf = self._make_strategy(
             broker="alpaca",
             allowed_symbols=["ES"],
             daily_start_capital=1_000_000,
         )
-        gw._sim_positions["SPY"] = {"pos": -3.809, "avg_cost": 732.09}
+        broker._sim_positions["SPY"] = {"pos": -3.809, "avg_cost": 732.09}
         strategy.sync_positions()
 
-        orig_sync = gw.get_positions_for_sync
+        orig_sync = broker.get_positions_for_sync
         stale_calls = {"n": 0}
 
         def _stale_then_live():
@@ -438,11 +437,11 @@ class TestMomentumStrategy:
                 }]
             return orig_sync()
 
-        gw.get_positions_for_sync = _stale_then_live  # type: ignore[method-assign]
+        broker.get_positions_for_sync = _stale_then_live  # type: ignore[method-assign]
 
         _fire(strategy, "ES", Signal.UP)
 
-        buy_orders = [o for o in gw._orders if o["action"] == "BUY"]
+        buy_orders = [o for o in broker._orders if o["action"] == "BUY"]
         assert len(buy_orders) == 2
         assert buy_orders[0]["position_intent"] == "close"
         assert buy_orders[0]["qty"] <= 3.809 + 1e-4
@@ -503,20 +502,20 @@ class TestMomentumStrategy:
 
     def test_extend_short_single_sell_to_open(self):
         """Regression: adding to an existing short must not send sell_to_close."""
-        strategy, gw, perf = self._make_strategy(
+        strategy, broker, perf = self._make_strategy(
             broker="alpaca",
             allowed_symbols=["NQ"],
             daily_start_capital=1_000_000,
         )
-        gw._sim_positions["QQQ"] = {"pos": -36.0, "avg_cost": 710.0}
+        broker._sim_positions["QQQ"] = {"pos": -36.0, "avg_cost": 710.0}
         strategy.sync_positions()
         assert strategy._net_qty["NQ"] == -36.0
 
         _fire(strategy, "NQ", Signal.DOWN)
 
-        sell_orders = [o for o in gw._orders if o["action"] == "SELL"]
+        sell_orders = [o for o in broker._orders if o["action"] == "SELL"]
         assert len(sell_orders) == 1, (
-            f"Expected one sell_to_open leg, got orders={gw._orders}"
+            f"Expected one sell_to_open leg, got orders={broker._orders}"
         )
         assert sell_orders[0]["position_intent"] == "open"
         # Regression (July 8 2026): the open leg must be the *delta* only.
@@ -528,7 +527,7 @@ class TestMomentumStrategy:
             f"Extend-short leg must be the delta, not the full target: qty={sold}"
         )
         qqq_pos = next(
-            p["pos"] for p in gw.get_open_positions() if p["symbol"] == "QQQ"
+            p["pos"] for p in broker.get_open_positions() if p["symbol"] == "QQQ"
         )
         assert abs(qqq_pos - strategy._net_qty["NQ"]) < 1e-6, (
             f"Broker ({qqq_pos}) and strategy ({strategy._net_qty['NQ']}) "
@@ -538,18 +537,18 @@ class TestMomentumStrategy:
 
     def test_short_dust_up_covers_then_opens_long(self):
         """Regression: sub-lot short dust must cover before buy_to_open (July 2026)."""
-        strategy, gw, perf = self._make_strategy(
+        strategy, broker, perf = self._make_strategy(
             broker="alpaca",
             allowed_symbols=["ES"],
             daily_start_capital=1_000_000,
         )
-        gw._sim_positions["SPY"] = {"pos": -1e-8, "avg_cost": 732.09}
+        broker._sim_positions["SPY"] = {"pos": -1e-8, "avg_cost": 732.09}
         strategy.sync_positions()
         assert "ES" not in strategy._net_qty
 
         _fire(strategy, "ES", Signal.UP)
 
-        buy_orders = [o for o in gw._orders if o["action"] == "BUY"]
+        buy_orders = [o for o in broker._orders if o["action"] == "BUY"]
         assert len(buy_orders) == 2, f"Expected cover + open, got {buy_orders}"
         assert buy_orders[0]["position_intent"] == "close"
         assert buy_orders[0]["qty"] <= 1e-7

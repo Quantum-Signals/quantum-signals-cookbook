@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from loguru import logger
 
-from trader.gateways.base import GatewayBase
+from qs_trader_broker_core import BrokerBase
 from trader.models import PerformanceTracker, Signal
 
 
-def report_once(gw: GatewayBase, perf: PerformanceTracker) -> None:
+def report_once(broker: BrokerBase, perf: PerformanceTracker) -> None:
     """Log account summary, open positions, and bot performance (single snapshot)."""
     try:
-        acct = gw.get_account_summary()
-        pos_list = gw.get_open_positions()
+        acct = broker.get_account_summary()
+        pos_list = broker.get_open_positions()
 
         logger.info("=" * 60)
         logger.info(

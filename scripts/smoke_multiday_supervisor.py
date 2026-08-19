@@ -3,7 +3,7 @@
 This is an *offline* smoke test for the continuous-process / per-day-logfile
 logic added to ``trader.app``. It:
 
-  * Forces ``DRY_RUN=true`` so the SimulatedGateway is used (no real broker).
+  * Forces ``DRY_RUN=true`` so the SimulatedBroker is used (no real broker).
   * Stubs the QuantumSignals streaming thread so no real API calls are made.
   * Monkey-patches ``trader.app.datetime`` with a sim clock that advances
     SPEED× faster than wall time.
@@ -23,7 +23,7 @@ What this verifies
 What this does NOT verify
 -------------------------
   * Real QuantumSignals stream behaviour (the thread is stubbed out).
-  * Real broker order placement (SimulatedGateway is used).
+  * Real broker order placement (SimulatedBroker is used).
   * Real wall-clock pacing (sim clock is accelerated).
 
 Usage

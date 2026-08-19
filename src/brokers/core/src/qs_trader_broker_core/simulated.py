@@ -7,8 +7,8 @@ from typing import Optional
 
 from loguru import logger
 
-from trader.config import Settings
-from trader.gateways.base import GatewayBase
+from qs_trader_broker_core.base import BrokerBase, OrderResult
+from qs_trader_broker_core.settings import SimulatedSettings
 
 
 @dataclass
@@ -19,15 +19,53 @@ class SimContract:
     currency: str
 
 
-class SimulatedGateway(GatewayBase):
+class SimulatedBroker(BrokerBase):
     """
     In-memory broker that logs trades without connecting to anything.
     Prices jitter around configured sim prices so the PnL logic gets exercised.
+
+    Owns its own symbol map (contract shapes) and seed prices; both fall back
+    to the class defaults when the ``symbol_map`` / ``sim_prices`` constructor
+    overrides are omitted. Any symbol not in the map is auto-created so DRY_RUN
+    can exercise arbitrary symbols.
     """
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
-        self._prices: dict[str, float] = dict(settings.sim_prices)
+    # Simulates fractional fills (and mimics Alpaca's fractional-short
+    # rejection, code 42210000), so DRY_RUN exercises the same fractional
+    # sizing path as the live equity/ETF broker it stands in for.
+    supports_fractional: bool = True
+
+    DEFAULT_SYMBOL_MAP: dict[str, dict] = {
+        "ES":   {"symbol": "ES",   "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "NQ":   {"symbol": "NQ",   "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "YM":   {"symbol": "YM",   "secType": "FUT", "exchange": "CBOT",  "currency": "USD"},
+        "RTY":  {"symbol": "RTY",  "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "CL":   {"symbol": "CL",   "secType": "FUT", "exchange": "NYMEX", "currency": "USD"},
+        "GC":   {"symbol": "GC",   "secType": "FUT", "exchange": "COMEX", "currency": "USD"},
+        "MES":  {"symbol": "MES",  "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "MNQ":  {"symbol": "MNQ",  "secType": "FUT", "exchange": "CME",   "currency": "USD"},
+        "AAPL": {"symbol": "AAPL", "secType": "STK", "exchange": "SMART", "currency": "USD"},
+        "SPY":  {"symbol": "SPY",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
+        "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
+    }
+
+    DEFAULT_PRICES: dict[str, float] = {
+        "ES": 5450.00, "NQ": 19200.00, "YM": 42500.00, "RTY": 2050.00,
+        "MES": 5450.00, "MNQ": 19200.00,
+        "CL": 68.50, "GC": 2350.00, "AAPL": 218.50, "SPY": 545.00, "QQQ": 470.00,
+    }
+
+    def __init__(
+        self,
+        settings: Optional[SimulatedSettings] = None,
+        *,
+        symbol_map: Optional[dict[str, dict]] = None,
+        sim_prices: Optional[dict[str, float]] = None,
+    ) -> None:
+        # Self-load env settings (SIM_*) when not injected.
+        self._settings = settings if settings is not None else SimulatedSettings()
+        self._symbol_map = symbol_map or self.DEFAULT_SYMBOL_MAP
+        self._prices: dict[str, float] = dict(sim_prices or self.DEFAULT_PRICES)
         self._orders: list[dict] = []
         self._sim_positions: dict[str, dict] = {}
         self._sim_account = {
@@ -38,13 +76,13 @@ class SimulatedGateway(GatewayBase):
         }
 
     def connect(self) -> None:
-        logger.success("[SIM] Simulated gateway connected (DRY-RUN mode)")
+        logger.success("[SIM] Simulated broker connected (DRY-RUN mode)")
 
     def disconnect(self) -> None:
-        logger.info("[SIM] Simulated gateway disconnected")
+        logger.info("[SIM] Simulated broker disconnected")
 
     def resolve_contract(self, qs_symbol: str) -> Optional[SimContract]:
-        spec = self._settings.symbol_map.get(qs_symbol)
+        spec = self._symbol_map.get(qs_symbol)
         if spec is None:
             logger.info(f"[SIM] Symbol '{qs_symbol}' not in symbol map — auto-creating simulated contract")
             return SimContract(symbol=qs_symbol, sec_type="FUT", exchange="SIM", currency="USD")
@@ -60,9 +98,11 @@ class SimulatedGateway(GatewayBase):
         if base is None:
             base = 1000.0
             self._prices[contract.symbol] = base
-        jitter = base * random.uniform(-0.001, 0.001)
-        self._prices[contract.symbol] = base + jitter
-        return round(self._prices[contract.symbol], 2)
+        j = self._settings.price_jitter
+        if j:
+            base = base + base * random.uniform(-j, j)
+            self._prices[contract.symbol] = base
+        return round(base, 2)
 
     def place_order(
         self,
@@ -71,7 +111,7 @@ class SimulatedGateway(GatewayBase):
         qty: int | float,
         price: Optional[float] = None,
         position_intent: Optional[str] = None,
-    ) -> Optional[dict]:
+    ) -> Optional[OrderResult]:
         order_id = len(self._orders) + 1
         fill_price = price or self.get_last_price(contract) or 0.0
         symbol = contract.symbol
@@ -79,7 +119,7 @@ class SimulatedGateway(GatewayBase):
         cur_pos = float(self._sim_positions.get(symbol, {"pos": 0}).get("pos", 0))
 
         if action.upper() == "SELL" and position_intent == "close":
-            long_avail = _sim_long_available(self._sim_positions.get(symbol, {"pos": 0}))
+            long_avail = max(0.0, cur_pos)
             if float(qty) > long_avail + 1e-9:
                 logger.error(
                     f"[SIM] REJECTED {symbol}: insufficient long qty "
@@ -127,7 +167,15 @@ class SimulatedGateway(GatewayBase):
         logger.info(
             f"[SIM] Order #{order_id} FILLED  {action} {qty}x {symbol} @ {fill_price:.2f}"
         )
-        return order
+        return OrderResult(
+            id=str(order_id),
+            symbol=symbol,
+            action=action.upper(),
+            qty=qty,
+            price=fill_price,
+            status="FILLED",
+            raw=order,
+        )
 
     def get_account_summary(self) -> dict:
         return dict(self._sim_account)
@@ -150,8 +198,3 @@ class SimulatedGateway(GatewayBase):
             for sym, d in self._sim_positions.items()
             if d["pos"] != 0
         ]
-
-
-def _sim_long_available(pos: dict) -> float:
-    qty = float(pos.get("pos", 0))
-    return max(0.0, qty)

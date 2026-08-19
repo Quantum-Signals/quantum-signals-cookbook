@@ -6,8 +6,13 @@ from typing import Any, Optional
 
 from loguru import logger
 
-from trader.config import Settings
-from trader.gateways.base import GatewayBase, normalize_position_side
+from qs_trader_broker_core import (
+    BrokerBase,
+    OrderResult,
+    normalize_position_side,
+)
+
+from qs_trader_broker_alpaca.settings import AlpacaSettings
 
 # Alpaca's RESTClient uses ``requests.Session`` without per-call timeouts, so a
 # stalled TCP connection can block the main trading loop forever (e.g. during
@@ -29,20 +34,47 @@ def _install_default_request_timeout(rest_client: object, timeout: tuple[float, 
     session.request = request_with_default_timeout  # type: ignore[method-assign]
 
 
-class AlpacaGateway(GatewayBase):
-    """Broker gateway backed by the Alpaca REST API (alpaca-py).
+class AlpacaBroker(BrokerBase):
+    """Broker backed by the Alpaca REST API (alpaca-py).
 
-    Supports equity / ETF trading only.  Futures symbols in the symbol map
-    (secType != "STK") are rejected with a warning from resolve_contract().
+    Supports equity / ETF trading only, so it owns its own symbol map:
+    QuantumSignals symbol → tradable Alpaca ticker. Futures signals (ES, NQ,
+    …) map to correlated ETFs; equity/ETF signals map to themselves. Pass a
+    ``symbol_map`` override to the constructor to replace ``DEFAULT_SYMBOL_MAP``
+    (values are plain tickers).
 
-    The ``contract`` object used throughout this gateway is a plain ticker
+    Configuration is loaded from ``ALPACA_*`` env vars via ``AlpacaSettings``;
+    the broker self-loads unless a settings object is injected.
+
+    The ``contract`` object used throughout this broker is a plain ticker
     string (e.g. ``"SPY"``), which is sufficient for all Alpaca REST calls.
-    This is compatible with the dict-branch of ``_extract_fill_price()`` in
-    the strategy layer, which reads ``trade_result["price"]``.
+    ``place_order`` returns a broker-agnostic ``OrderResult`` with the fill
+    price already resolved.
     """
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
+    # Alpaca fills fractional equity/ETF quantities (long side). The strategy
+    # layer reads this to size orders fractionally; fractional shorts are still
+    # rejected by Alpaca (code 42210000) and handled per-leg in the strategy.
+    supports_fractional: bool = True
+
+    DEFAULT_SYMBOL_MAP: dict[str, str] = {
+        "ES": "SPY",
+        "NQ": "QQQ",
+        "S&P500": "SPY",
+        "Nasdaq100": "QQQ",
+        "SPY": "SPY",
+        "QQQ": "QQQ",
+        "AAPL": "AAPL",
+    }
+
+    def __init__(
+        self,
+        settings: Optional[AlpacaSettings] = None,
+        *,
+        symbol_map: Optional[dict[str, str]] = None,
+    ) -> None:
+        self._settings = settings if settings is not None else AlpacaSettings()
+        self._symbol_map = symbol_map or self.DEFAULT_SYMBOL_MAP
         self._trading_client: object = None
         self._data_client: object = None
 
@@ -55,19 +87,19 @@ class AlpacaGateway(GatewayBase):
         from alpaca.trading.client import TradingClient
 
         self._trading_client = TradingClient(
-            self._settings.alpaca_api_key,
-            self._settings.alpaca_secret_key,
-            paper=self._settings.alpaca_paper,
+            self._settings.api_key,
+            self._settings.secret_key,
+            paper=self._settings.paper,
         )
         self._data_client = StockHistoricalDataClient(
-            self._settings.alpaca_api_key,
-            self._settings.alpaca_secret_key,
+            self._settings.api_key,
+            self._settings.secret_key,
         )
         _install_default_request_timeout(self._trading_client, _DEFAULT_ALPACA_HTTP_TIMEOUT)
         _install_default_request_timeout(self._data_client, _DEFAULT_ALPACA_HTTP_TIMEOUT)
 
         account = self._trading_client.get_account()
-        mode = "PAPER" if self._settings.alpaca_paper else "LIVE"
+        mode = "PAPER" if self._settings.paper else "LIVE"
         logger.success(
             f"Connected to Alpaca ({mode})  "
             f"equity=${float(account.equity):,.2f}  "
@@ -76,36 +108,40 @@ class AlpacaGateway(GatewayBase):
 
     def disconnect(self) -> None:
         # Alpaca is REST-based; no persistent socket to close.
-        logger.info("Alpaca gateway disconnected (REST — nothing to tear down)")
+        logger.info("Alpaca broker disconnected (REST — nothing to tear down)")
 
     # ------------------------------------------------------------------
     # Contract resolution
     # ------------------------------------------------------------------
 
     def resolve_contract(self, qs_symbol: str) -> Optional[str]:
-        """Return the Alpaca ticker string for *qs_symbol*, or None.
+        """Return the tradable Alpaca ticker string for *qs_symbol*, or None.
 
-        Only STK entries in the symbol map are tradeable on Alpaca.
-        If the symbol is not in the map at all it is treated as a direct
-        Alpaca ticker (useful when positions are already held as ETF tickers).
+        Looks *qs_symbol* up in the symbol map (QS symbol → ticker). A symbol
+        not in the map is treated as a direct Alpaca ticker (useful when
+        positions are already held as ETF tickers). Returns ``None`` only if a
+        map override yields a non-equity spec, since Alpaca trades
+        equities/ETFs only.
         """
-        spec = self._settings.symbol_map.get(qs_symbol)
-        if spec is None:
+        entry = self._symbol_map.get(qs_symbol)
+        if entry is None:
             # Not in map — assume the caller already passed an Alpaca ticker.
             logger.debug(f"[Alpaca] '{qs_symbol}' not in symbol map — treating as direct ticker")
             return qs_symbol
 
-        sec_type = spec.get("secType", "STK")
-        if sec_type != "STK":
-            logger.warning(
-                f"[Alpaca] '{qs_symbol}' is secType={sec_type} — "
-                "Alpaca only supports equities/ETFs; skipping"
-            )
-            return None
+        # A plain ticker string is the native shape; a dict-shaped override
+        # (a full contract spec) is tolerated by reading its symbol, but only STK.
+        if isinstance(entry, dict):
+            if entry.get("secType", "STK") != "STK":
+                logger.warning(
+                    f"[Alpaca] '{qs_symbol}' is secType={entry.get('secType')} — "
+                    "Alpaca only supports equities/ETFs; skipping"
+                )
+                return None
+            entry = entry["symbol"]
 
-        ticker = spec["symbol"]
-        logger.debug(f"[Alpaca] Resolved '{qs_symbol}' → '{ticker}'")
-        return ticker
+        logger.debug(f"[Alpaca] Resolved '{qs_symbol}' → '{entry}'")
+        return entry
 
     # ------------------------------------------------------------------
     # Market data
@@ -139,42 +175,41 @@ class AlpacaGateway(GatewayBase):
         qty: int | float,
         price: Optional[float] = None,
         position_intent: Optional[str] = None,
-    ) -> Optional[dict]:
+    ) -> Optional[OrderResult]:
         from alpaca.trading.enums import OrderSide, PositionIntent, TimeInForce
         from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
         ticker = contract
         side = OrderSide.BUY if action.upper() == "BUY" else OrderSide.SELL
 
-        alpaca_intent: Optional[PositionIntent] = None
-        if position_intent == "open" and side == OrderSide.SELL:
-            alpaca_intent = PositionIntent.SELL_TO_OPEN
-        elif position_intent == "close" and side == OrderSide.SELL:
-            alpaca_intent = PositionIntent.SELL_TO_CLOSE
-        elif position_intent == "open" and side == OrderSide.BUY:
-            alpaca_intent = PositionIntent.BUY_TO_OPEN
-        elif position_intent == "close" and side == OrderSide.BUY:
-            alpaca_intent = PositionIntent.BUY_TO_CLOSE
+        alpaca_intent: Optional[PositionIntent] = {
+            ("open", OrderSide.SELL): PositionIntent.SELL_TO_OPEN,
+            ("close", OrderSide.SELL): PositionIntent.SELL_TO_CLOSE,
+            ("open", OrderSide.BUY): PositionIntent.BUY_TO_OPEN,
+            ("close", OrderSide.BUY): PositionIntent.BUY_TO_CLOSE,
+        }.get((position_intent, side))
 
-        if self._settings.use_market_orders or price is None:
-            req = MarketOrderRequest(
+        def build_request(order_qty: int | float, intent: Optional[PositionIntent]):
+            """Build the market/limit request for this order (used on submit and retry)."""
+            if self._settings.use_market_orders or price is None:
+                return MarketOrderRequest(
+                    symbol=ticker,
+                    qty=order_qty,
+                    side=side,
+                    time_in_force=TimeInForce.DAY,
+                    position_intent=intent,
+                )
+            return LimitOrderRequest(
                 symbol=ticker,
-                qty=qty,
-                side=side,
-                time_in_force=TimeInForce.DAY,
-                position_intent=alpaca_intent,
-            )
-            order_type = "MKT"
-        else:
-            req = LimitOrderRequest(
-                symbol=ticker,
-                qty=qty,
+                qty=order_qty,
                 side=side,
                 time_in_force=TimeInForce.DAY,
                 limit_price=price,
-                position_intent=alpaca_intent,
+                position_intent=intent,
             )
-            order_type = f"LMT@{price}"
+
+        req = build_request(qty, alpaca_intent)
+        order_type = "MKT" if isinstance(req, MarketOrderRequest) else f"LMT@{price}"
 
         logger.debug(f"[Alpaca] Submit {action.upper()} {qty}x {ticker} ({order_type})…")
         try:
@@ -213,23 +248,7 @@ class AlpacaGateway(GatewayBase):
                     f"position_intent={retry_intent.value} "
                     f"(was {alpaca_intent.value if alpaca_intent else 'unset'})"
                 )
-                if isinstance(req, MarketOrderRequest):
-                    req = MarketOrderRequest(
-                        symbol=ticker,
-                        qty=retry_qty,
-                        side=side,
-                        time_in_force=TimeInForce.DAY,
-                        position_intent=retry_intent,
-                    )
-                else:
-                    req = LimitOrderRequest(
-                        symbol=ticker,
-                        qty=retry_qty,
-                        side=side,
-                        time_in_force=TimeInForce.DAY,
-                        limit_price=price,
-                        position_intent=retry_intent,
-                    )
+                req = build_request(retry_qty, retry_intent)
                 try:
                     order = self._trading_client.submit_order(req)
                     qty = retry_qty
@@ -260,11 +279,8 @@ class AlpacaGateway(GatewayBase):
                     filled_avg_price = float(refreshed.filled_avg_price)
                     break
                 if str(refreshed.status) in {"filled", "partially_filled"}:
-                    filled_avg_price = (
-                        float(refreshed.filled_avg_price)
-                        if refreshed.filled_avg_price is not None
-                        else None
-                    )
+                    # Filled but no avg price yet — fall through to the last-price
+                    # fallback below (filled_avg_price is still None here).
                     break
             except Exception:
                 break
@@ -277,14 +293,15 @@ class AlpacaGateway(GatewayBase):
             f"fill_price={filled_avg_price}  id={order.id}"
         )
 
-        return {
-            "id": str(order.id),
-            "symbol": ticker,
-            "action": action.upper(),
-            "qty": qty,
-            "price": filled_avg_price,
-            "status": str(order.status),
-        }
+        return OrderResult(
+            id=str(order.id),
+            symbol=ticker,
+            action=action.upper(),
+            qty=qty,
+            price=filled_avg_price,
+            status=str(order.status),
+            raw=order,
+        )
 
     # ------------------------------------------------------------------
     # Account & positions
