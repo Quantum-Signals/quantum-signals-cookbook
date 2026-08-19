@@ -17,14 +17,15 @@ __all__ = ["BrokerBase", "discover_brokers", "create_broker"]
 BROKER_ENTRY_POINT_GROUP = "qs_trader_brokers"
 
 
-def discover_brokers() -> dict[str, Callable[[Settings], BrokerBase]]:
+def discover_brokers() -> dict[str, Callable[[], BrokerBase]]:
     """Return ``{name: broker_factory}`` for every registered broker.
 
-    Each entry point loads to a ``BrokerBase`` subclass (or any callable taking
-    ``Settings``). Discovery is dynamic: installing a package that registers a
-    ``qs_trader_brokers`` entry point makes its broker appear here.
+    Each entry point loads to a ``BrokerBase`` subclass (or any no-arg callable
+    returning one — brokers self-load their own config). Discovery is dynamic:
+    installing a package that registers a ``qs_trader_brokers`` entry point makes
+    its broker appear here.
     """
-    registry: dict[str, Callable[[Settings], BrokerBase]] = {}
+    registry: dict[str, Callable[[], BrokerBase]] = {}
     for ep in entry_points(group=BROKER_ENTRY_POINT_GROUP):
         registry[ep.name] = ep.load()
     return registry

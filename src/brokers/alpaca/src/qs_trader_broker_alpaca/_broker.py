@@ -182,35 +182,34 @@ class AlpacaBroker(BrokerBase):
         ticker = contract
         side = OrderSide.BUY if action.upper() == "BUY" else OrderSide.SELL
 
-        alpaca_intent: Optional[PositionIntent] = None
-        if position_intent == "open" and side == OrderSide.SELL:
-            alpaca_intent = PositionIntent.SELL_TO_OPEN
-        elif position_intent == "close" and side == OrderSide.SELL:
-            alpaca_intent = PositionIntent.SELL_TO_CLOSE
-        elif position_intent == "open" and side == OrderSide.BUY:
-            alpaca_intent = PositionIntent.BUY_TO_OPEN
-        elif position_intent == "close" and side == OrderSide.BUY:
-            alpaca_intent = PositionIntent.BUY_TO_CLOSE
+        alpaca_intent: Optional[PositionIntent] = {
+            ("open", OrderSide.SELL): PositionIntent.SELL_TO_OPEN,
+            ("close", OrderSide.SELL): PositionIntent.SELL_TO_CLOSE,
+            ("open", OrderSide.BUY): PositionIntent.BUY_TO_OPEN,
+            ("close", OrderSide.BUY): PositionIntent.BUY_TO_CLOSE,
+        }.get((position_intent, side))
 
-        if self._settings.use_market_orders or price is None:
-            req = MarketOrderRequest(
+        def build_request(order_qty: int | float, intent: Optional[PositionIntent]):
+            """Build the market/limit request for this order (used on submit and retry)."""
+            if self._settings.use_market_orders or price is None:
+                return MarketOrderRequest(
+                    symbol=ticker,
+                    qty=order_qty,
+                    side=side,
+                    time_in_force=TimeInForce.DAY,
+                    position_intent=intent,
+                )
+            return LimitOrderRequest(
                 symbol=ticker,
-                qty=qty,
-                side=side,
-                time_in_force=TimeInForce.DAY,
-                position_intent=alpaca_intent,
-            )
-            order_type = "MKT"
-        else:
-            req = LimitOrderRequest(
-                symbol=ticker,
-                qty=qty,
+                qty=order_qty,
                 side=side,
                 time_in_force=TimeInForce.DAY,
                 limit_price=price,
-                position_intent=alpaca_intent,
+                position_intent=intent,
             )
-            order_type = f"LMT@{price}"
+
+        req = build_request(qty, alpaca_intent)
+        order_type = "MKT" if isinstance(req, MarketOrderRequest) else f"LMT@{price}"
 
         logger.debug(f"[Alpaca] Submit {action.upper()} {qty}x {ticker} ({order_type})…")
         try:
@@ -249,23 +248,7 @@ class AlpacaBroker(BrokerBase):
                     f"position_intent={retry_intent.value} "
                     f"(was {alpaca_intent.value if alpaca_intent else 'unset'})"
                 )
-                if isinstance(req, MarketOrderRequest):
-                    req = MarketOrderRequest(
-                        symbol=ticker,
-                        qty=retry_qty,
-                        side=side,
-                        time_in_force=TimeInForce.DAY,
-                        position_intent=retry_intent,
-                    )
-                else:
-                    req = LimitOrderRequest(
-                        symbol=ticker,
-                        qty=retry_qty,
-                        side=side,
-                        time_in_force=TimeInForce.DAY,
-                        limit_price=price,
-                        position_intent=retry_intent,
-                    )
+                req = build_request(retry_qty, retry_intent)
                 try:
                     order = self._trading_client.submit_order(req)
                     qty = retry_qty
@@ -296,11 +279,8 @@ class AlpacaBroker(BrokerBase):
                     filled_avg_price = float(refreshed.filled_avg_price)
                     break
                 if str(refreshed.status) in {"filled", "partially_filled"}:
-                    filled_avg_price = (
-                        float(refreshed.filled_avg_price)
-                        if refreshed.filled_avg_price is not None
-                        else None
-                    )
+                    # Filled but no avg price yet — fall through to the last-price
+                    # fallback below (filled_avg_price is still None here).
                     break
             except Exception:
                 break

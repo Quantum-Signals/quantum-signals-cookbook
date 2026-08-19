@@ -36,8 +36,6 @@ def normalize_position_side(side: object, *, qty: float = 0.0) -> str:
         if label in ("long", "short"):
             return label
     label = str(side or ("long" if qty >= 0 else "short")).lower()
-    if label in ("long", "short"):
-        return label
     return "short" if "short" in label else "long"
 
 

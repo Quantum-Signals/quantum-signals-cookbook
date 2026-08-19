@@ -119,7 +119,7 @@ class SimulatedBroker(BrokerBase):
         cur_pos = float(self._sim_positions.get(symbol, {"pos": 0}).get("pos", 0))
 
         if action.upper() == "SELL" and position_intent == "close":
-            long_avail = _sim_long_available(self._sim_positions.get(symbol, {"pos": 0}))
+            long_avail = max(0.0, cur_pos)
             if float(qty) > long_avail + 1e-9:
                 logger.error(
                     f"[SIM] REJECTED {symbol}: insufficient long qty "
@@ -198,8 +198,3 @@ class SimulatedBroker(BrokerBase):
             for sym, d in self._sim_positions.items()
             if d["pos"] != 0
         ]
-
-
-def _sim_long_available(pos: dict) -> float:
-    qty = float(pos.get("pos", 0))
-    return max(0.0, qty)
