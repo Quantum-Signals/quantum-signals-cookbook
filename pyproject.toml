@@ -8,7 +8,7 @@ dependencies = [
     "loguru>=0.7.3",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.2.2",
-    "quantumsignals-client>=0.6.0",
+    "quantumsignals-client>=0.9.0",
     # Broker packages (workspace members). Each owns its own broker SDK
     # (e.g. alpaca-py) and registers a "qs_trader_brokers" entry point that
     # trader.brokers.create_broker discovers at runtime.

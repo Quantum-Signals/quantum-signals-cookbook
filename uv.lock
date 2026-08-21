@@ -459,7 +459,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "qs-trader-broker-alpaca", editable = "src/brokers/alpaca" },
     { name = "qs-trader-broker-core", editable = "src/brokers/core" },
-    { name = "quantumsignals-client", specifier = ">=0.6.0" },
+    { name = "quantumsignals-client", specifier = ">=0.9.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1008,7 +1008,7 @@ requires-dist = [
 
 [[package]]
 name = "quantumsignals-client"
-version = "0.6.0"
+version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -1017,9 +1017,9 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/68/e21a1e29268c02ee76c39db6b3c784fdfa26e6591fba9aff68d01a4bbbdc/quantumsignals_client-0.6.0.tar.gz", hash = "sha256:42d79b7e3cfc1c6998e405c6a8951f4f544282494c8a3e0afabec78f617b89bd", size = 18872, upload-time = "2026-06-24T11:22:05.243Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0c/ad/f12717ba6c0a20abbe01724b360bccbe82c400eaeb63f07c0d5a51726568/quantumsignals_client-0.9.0.tar.gz", hash = "sha256:7a664b1aae50d1cf99e9fcc2b954a6854da3956ad5864f101082c089ae4d81bb", size = 24521, upload-time = "2026-08-03T06:35:10.137Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f0/46/6d5e4370030974c9cc93b75c5954555acda6d96d2270fd01eec7ea9871ee/quantumsignals_client-0.6.0-py3-none-any.whl", hash = "sha256:6cca498ed328e99fb5c072fbe2593dd046aa411dfbf6eca2ed27fa6d5d48bf19", size = 14957, upload-time = "2026-06-24T11:22:04.234Z" },
+    { url = "https://files.pythonhosted.org/packages/24/51/9ee828fc99ea495322f246d4b322d009f8dd7e6fd1bcb0dd23c140bea1a0/quantumsignals_client-0.9.0-py3-none-any.whl", hash = "sha256:ab02d32fdb9e02ecfeab70168d065aa3ea7f43729bb75cf3c8fd4f8edbe8661e", size = 17659, upload-time = "2026-08-03T06:35:08.426Z" },
 ]
 
 [[package]]
