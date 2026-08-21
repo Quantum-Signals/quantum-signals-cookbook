@@ -43,6 +43,7 @@ class Settings(BaseSettings):
         env_file=".env",
         extra="ignore",
         frozen=True,
+        populate_by_name=True,
     )
 
     # QuantumSignals API key — unprefixed, matching the QS client library's
