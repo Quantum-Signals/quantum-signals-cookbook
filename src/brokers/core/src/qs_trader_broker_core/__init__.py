@@ -2,7 +2,7 @@
 
 Every broker package depends on this package for the ``BrokerBase`` ABI and
 returns ``OrderResult`` from ``place_order``. The always-available
-``SimulatedBroker`` (used for ``DRY_RUN``) ships here too, since it has no
+``SimulatedBroker`` (``TRADER_BROKER=simulated``) ships here too, since it has no
 external broker dependency.
 """
 

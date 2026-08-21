@@ -34,29 +34,25 @@ def discover_brokers() -> dict[str, Callable[[], BrokerBase]]:
 def create_broker(settings: Settings) -> BrokerBase:
     """Factory: select and construct the configured broker.
 
-    ``settings`` is used **only** to choose which broker (``dry_run`` /
-    ``broker``); the app passes no configuration into the broker itself. Each
-    broker self-loads its own settings from the environment (e.g. ``ALPACA_*``),
-    so the factory constructs it with no arguments.
+    ``settings`` is used **only** to choose which broker (``broker``); the app
+    passes no configuration into the broker itself. Each broker self-loads its
+    own settings from the environment (e.g. ``ALPACA_*``), so the factory
+    constructs it with no arguments.
 
-    ``dry_run=True`` always wins → the ``simulated`` broker. Otherwise the
-    ``broker`` setting selects a broker discovered from the ``qs_trader_brokers``
-    entry-point group. An unknown broker raises ValueError listing the brokers
-    that are actually installed, so a typo in ``BROKER`` — or a missing broker
-    package — fails loudly at startup.
+    The ``broker`` setting selects a broker discovered from the
+    ``qs_trader_brokers`` entry-point group — ``BROKER=simulated`` (the
+    default) for no real orders, or ``BROKER=alpaca`` etc. to trade for real.
+    An unknown broker raises ValueError listing the brokers that are actually
+    installed, so a typo in ``BROKER`` — or a missing broker package — fails
+    loudly at startup.
     """
     registry = discover_brokers()
 
-    name = "simulated" if settings.dry_run else settings.broker
+    name = settings.broker
     try:
         factory = registry[name]
     except KeyError:
         available = ", ".join(sorted(registry)) or "(none installed)"
-        if settings.dry_run:
-            raise ValueError(
-                "The 'simulated' broker is not registered — the core package "
-                f"may be misinstalled. Discovered brokers: {available}."
-            ) from None
         raise ValueError(
             f"Unknown BROKER={settings.broker!r}. Installed brokers: {available}. "
             "Install the package that provides it, or check for a typo."

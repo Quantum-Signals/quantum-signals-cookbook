@@ -31,9 +31,9 @@ class Settings(BaseSettings):
     Broker connection settings and credentials are **not** here — each broker
     package owns and self-loads its own config from its own namespaced env vars
     (e.g. ``ALPACA_*``). This object only decides *which* broker to run
-    (``dry_run`` / ``broker``) and drives the session/strategy layer.
+    (``broker``) and drives the session/strategy layer.
 
-    Env var names carry a ``TRADER_`` prefix (e.g. ``TRADER_DRY_RUN``), except
+    Env var names carry a ``TRADER_`` prefix (e.g. ``TRADER_BROKER``), except
     ``qs_api_key`` which reads the QuantumSignals client's own
     ``QUANTUMSIGNALS_API_KEY`` convention (unprefixed).
     """
@@ -49,10 +49,10 @@ class Settings(BaseSettings):
     # QuantumSignals API key — unprefixed, matching the QS client library's
     # own env var. Required.
     qs_api_key: str = Field(validation_alias="QUANTUMSIGNALS_API_KEY")
-    dry_run: bool = True
-    # Broker selection: "alpaca" (default). The broker's own connection
-    # settings live in its package (e.g. AlpacaSettings).
-    broker: str = "alpaca"
+    # Broker selection: "simulated" (default, no real orders). Set to
+    # "alpaca" (or any other installed broker) to trade for real. The
+    # broker's own connection settings live in its package (e.g. AlpacaSettings).
+    broker: str = "simulated"
     max_stream_retries: int = 5
     strategy: str = "momentum"  # "momentum" or "signal_follower"
     # Comma-separated in the env var (``TRADER_ALLOWED_SYMBOLS=ES,NQ``); empty =
