@@ -30,8 +30,8 @@ name→class registry at runtime with `importlib.metadata.entry_points` and pick
 one:
 
 ```
-TRADER_DRY_RUN=true    → simulated broker (SimulatedBroker, in core)
-TRADER_BROKER=alpaca   → AlpacaBroker   (REST, ETFs, fractional longs)
+TRADER_BROKER=simulated   → simulated broker (SimulatedBroker, in core; the default)
+TRADER_BROKER=alpaca      → AlpacaBroker      (REST, ETFs, fractional longs)
 ```
 
 Installing a package that registers a broker under this group makes it
@@ -46,7 +46,7 @@ Broker packages depend on `qs-trader-broker-core`, **never on the app**. Each
 broker owns and self-loads its own configuration from namespaced env vars via
 `pydantic-settings`, so `create_broker()` constructs it with no arguments and
 the app passes it no config. The app's `Settings` only decides *which* broker to
-run (`TRADER_DRY_RUN` / `TRADER_BROKER`).
+run (`TRADER_BROKER`).
 
 ```
 trader (app) ──→ qs-trader-broker-core ←── qs-trader-broker-alpaca

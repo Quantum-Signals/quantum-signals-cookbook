@@ -3,7 +3,7 @@
 This is an *offline* smoke test for the continuous-process / per-day-logfile
 logic added to ``trader.app``. It:
 
-  * Forces ``DRY_RUN=true`` so the SimulatedBroker is used (no real broker).
+  * Forces ``TRADER_BROKER=simulated`` so the SimulatedBroker is used (no real broker).
   * Stubs the QuantumSignals streaming thread so no real API calls are made.
   * Monkey-patches ``trader.app.datetime`` with a sim clock that advances
     SPEED× faster than wall time.
@@ -76,8 +76,7 @@ def main() -> int:
         shutil.rmtree("logs")
 
     os.environ.setdefault("QUANTUMSIGNALS_API_KEY", "test_key_unused")
-    os.environ["DRY_RUN"] = "true"
-    os.environ.setdefault("BROKER", "alpaca")
+    os.environ["TRADER_BROKER"] = "simulated"
     os.environ.setdefault("STRATEGY", "momentum")
     os.environ.setdefault("CLOSE_ON_EXIT", "true")
     os.environ.setdefault("SESSION_END_TIME", "16:00")

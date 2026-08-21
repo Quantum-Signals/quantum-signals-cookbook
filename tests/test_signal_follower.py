@@ -9,7 +9,7 @@ from trader.strategy.signal_follower import SignalFollowerStrategy
 def _make_settings(**overrides) -> Settings:
     # _env_file=None isolates tests from a developer's local .env so ambient
     # TRADER_* values (e.g. ALLOWED_SYMBOLS) can't leak into fixtures.
-    defaults = dict(qs_api_key="test-key", dry_run=True)
+    defaults = dict(qs_api_key="test-key")
     defaults.update(overrides)
     return Settings(_env_file=None, **defaults)
 

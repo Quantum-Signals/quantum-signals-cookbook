@@ -366,7 +366,7 @@ def main() -> None:
     settings = load_settings()
     tz = _get_tz(settings)
 
-    if settings.dry_run:
+    if settings.broker == "simulated":
         broker_label = "DRY-RUN (simulated)"
     else:
         broker_label = f"LIVE ({settings.broker.upper()})"

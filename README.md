@@ -14,7 +14,7 @@ An algorithmic trading bot that streams real-time signals from [QuantumSignals](
 
 - [Docker](https://docs.docker.com/get-docker/) installed on your machine
 - A **QuantumSignals** API key — get one at [quantumsignals.io](https://quantumsignals.io)
-- An **Alpaca** account and API keys (only when `TRADER_DRY_RUN=false` and `TRADER_BROKER=alpaca`) — [alpaca.markets](https://alpaca.markets)
+- An **Alpaca** account and API keys (only when `TRADER_BROKER=alpaca`) — [alpaca.markets](https://alpaca.markets)
 
 ---
 
@@ -29,10 +29,9 @@ Copy `.env.example` or create a file named `.env` in any folder on your machine:
 QUANTUMSIGNALS_API_KEY=your_qs_api_key_here
 
 # ── Safety (start here — no broker credentials needed) ───
-TRADER_DRY_RUN=true
+TRADER_BROKER=simulated
 
 # ── Paper trading (step 2 — uncomment when ready) ─────────
-# TRADER_DRY_RUN=false
 # TRADER_BROKER=alpaca
 # ALPACA_API_KEY=your_alpaca_api_key_here
 # ALPACA_SECRET_KEY=your_alpaca_secret_key_here
@@ -104,9 +103,9 @@ uv run live-trader --execution-interval 10   # overrides TRADER_EXECUTION_INTERV
 
 | Variable | Description |
 |---|---|
-| `QUANTUMSIGNALS_API_KEY` | Your QuantumSignals API key (always required, even in `TRADER_DRY_RUN`) |
+| `QUANTUMSIGNALS_API_KEY` | Your QuantumSignals API key (always required, even with the simulated broker) |
 
-Alpaca credentials are required only when `TRADER_DRY_RUN=false` **and** `TRADER_BROKER=alpaca`:
+Alpaca credentials are required only when `TRADER_BROKER=alpaca`:
 
 | Variable | Description |
 |---|---|
@@ -117,9 +116,8 @@ Alpaca credentials are required only when `TRADER_DRY_RUN=false` **and** `TRADER
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRADER_DRY_RUN` | `true` | `true` = simulated broker — no real orders, no Alpaca/IB connection needed for trading |
-| `TRADER_BROKER` | `alpaca` | Broker to use (any installed broker; `alpaca` ships by default). Ignored when `TRADER_DRY_RUN=true` |
-| `ALPACA_PAPER` | `true` | `true` = Alpaca paper account, `false` = Alpaca live account (real money) |
+| `TRADER_BROKER` | `simulated` | Broker to use. `simulated` = no real orders, no Alpaca/IB connection needed. Set to `alpaca` (or any other installed broker) to trade for real |
+| `ALPACA_PAPER` | `true` | Only applies when `TRADER_BROKER=alpaca`. `true` = Alpaca paper account, `false` = Alpaca live account (real money) |
 
 ### Strategy
 
@@ -233,37 +231,33 @@ time. Other brokers define their own mappings; see
 
 ## Paper Trading vs Live Trading
 
-The bot has **three layers** of safety, applied in this order:
+The bot has **two layers** of safety, applied in this order:
 
-1. **`TRADER_DRY_RUN`** — simulated broker (`SimulatedBroker`). No broker credentials
-   needed for order placement. Use this first to verify signal streaming and strategy
-   logic locally.
-2. **`TRADER_BROKER`** — choose an installed broker (Alpaca ships by default:
-   REST, ETFs). Ignored when `TRADER_DRY_RUN=true`.
-3. **Paper vs live account** — broker-specific switch for real (but fake-money)
+1. **`TRADER_BROKER`** — choose an installed broker. `simulated` (the default)
+   needs no broker credentials and places no real orders — use it first to
+   verify signal streaming and strategy logic locally. Any other value (e.g.
+   `alpaca`) trades for real.
+2. **Paper vs live account** — broker-specific switch for real (but fake-money)
    vs real-money execution.
 
 ### Alpaca (`TRADER_BROKER=alpaca`)
 
-| `TRADER_DRY_RUN` | `ALPACA_PAPER` | Result |
-|---|---|---|
-| `true` | any | Simulated — no Alpaca connection for orders |
-| `false` | `true` | Real orders to Alpaca **paper** account |
-| `false` | `false` | Real orders to Alpaca **live** account — **real money** |
+| `ALPACA_PAPER` | Result |
+|---|---|
+| `true` | Real orders to Alpaca **paper** account |
+| `false` | Real orders to Alpaca **live** account — **real money** |
 
 ### Recommended progression
 
 ```env
 # 1. Verify signals + strategy logic (no broker needed)
-TRADER_DRY_RUN=true
+TRADER_BROKER=simulated
 
 # 2. Paper trade with real broker fills
-TRADER_DRY_RUN=false
 TRADER_BROKER=alpaca
 ALPACA_PAPER=true
 
 # 3. Live trading — only after paper results look correct
-TRADER_DRY_RUN=false
 TRADER_BROKER=alpaca
 ALPACA_PAPER=false
 ```

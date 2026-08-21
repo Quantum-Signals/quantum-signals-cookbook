@@ -28,7 +28,7 @@ A long-running Python process that:
 
 1. Streams minute-level ML signals from QuantumSignals (SSE)
 2. Applies a pluggable strategy (`momentum` or `signal_follower`)
-3. Places orders through the selected broker (e.g. Alpaca) or a simulated broker (`TRADER_DRY_RUN`)
+3. Places orders through the selected broker (`TRADER_BROKER`: `simulated` by default, or a real broker like Alpaca)
 4. Flattens positions at session end and logs daily / run summaries
 
 ### Document map
@@ -468,13 +468,12 @@ Full operator reference (env vars, strategies, symbols, paper vs live): [README.
 | `TRADER_DAILY_START_CAPITAL` | Momentum per-symbol daily notional; summary return % for both strategies |
 | `TRADER_EXECUTION_INTERVAL_MINUTES` | Momentum execution gate; signal_follower decision grid |
 | `TRADER_ALLOWED_SYMBOLS` | Filters QS symbols (comma-separated QS names, e.g. `S&P500,Nasdaq100`) |
-| `TRADER_BROKER` | Selects the broker; drives fractional vs whole-share sizing (ignored when `TRADER_DRY_RUN=true`) |
-| `TRADER_DRY_RUN` | Simulated broker — no real orders |
-| `ALPACA_PAPER` | Paper vs live account when `TRADER_DRY_RUN=false` |
+| `TRADER_BROKER` | Selects the broker (`simulated` = no real orders, the default); drives fractional vs whole-share sizing |
+| `ALPACA_PAPER` | Paper vs live account when `TRADER_BROKER=alpaca` |
 
 ### Paper vs live (summary)
 
-Three layers: `TRADER_DRY_RUN` (simulated) → `TRADER_BROKER` (which broker) → the broker's own paper/live switch (e.g. `ALPACA_PAPER`). See [README.md § Paper Trading vs Live Trading](README.md#paper-trading-vs-live-trading).
+Two layers: `TRADER_BROKER` (`simulated` vs a real broker like `alpaca`) → the broker's own paper/live switch (e.g. `ALPACA_PAPER`). See [README.md § Paper Trading vs Live Trading](README.md#paper-trading-vs-live-trading).
 
 ### Symbol maps & code-only settings
 
@@ -516,8 +515,8 @@ Requires code change to tune via `.env`.
 uv sync
 cp .env.example .env   # set QUANTUMSIGNALS_API_KEY at minimum
 
-# Safest: simulated broker
-TRADER_DRY_RUN=true uv run live-trader
+# Safest: simulated broker (the default)
+TRADER_BROKER=simulated uv run live-trader
 
 # CLI override
 uv run live-trader --execution-interval 10
