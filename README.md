@@ -2,11 +2,9 @@
 
 An algorithmic trading bot that streams real-time signals from [QuantumSignals](https://quantumsignals.io) and executes trades automatically through a pluggable broker (**Alpaca** included).
 
-**Developer documentation:** [docs/architecture.md](docs/architecture.md) — architecture, module map, position-sizing logic, local development.
+**Developer documentation:** [docs/architecture.md](docs/architecture.md): module map, position-sizing logic, local development.
 
-**Broker plugin architecture:** [docs/brokers.md](docs/brokers.md) — how brokers plug in, and how to add your own.
-
-**QuantumSignals API client:** [docs/quantumsignals-client.md](docs/quantumsignals-client.md) — signal streaming, symbol names, backtests.
+**Broker plugin architecture:** [docs/brokers.md](docs/brokers.md): architecture, implementing your own broker.
 
 ---
 
@@ -14,7 +12,7 @@ An algorithmic trading bot that streams real-time signals from [QuantumSignals](
 
 - [Docker](https://docs.docker.com/get-docker/) installed on your machine
 - A **QuantumSignals** API key — get one at [quantumsignals.io](https://quantumsignals.io)
-- An **Alpaca** account and API keys (only when `TRADER_BROKER=alpaca`) — [alpaca.markets](https://alpaca.markets)
+- For Alpaca: **Alpaca** [account](https://alpaca.markets) and API keys
 
 ---
 
@@ -22,51 +20,40 @@ An algorithmic trading bot that streams real-time signals from [QuantumSignals](
 
 ### 1. Create your `.env` file
 
-Copy `.env.example` or create a file named `.env` in any folder on your machine:
+Copy `.env.example` or create a new `.env` file in the project folder. 
 
 ```env
-# ── Required ──────────────────────────────────────────────
+# Required:
 QUANTUMSIGNALS_API_KEY=your_qs_api_key_here
 
-# ── Safety (start here — no broker credentials needed) ───
-TRADER_BROKER=simulated
+# Alpaca paper trading:
+TRADER_BROKER=alpaca
+ALPACA_API_KEY=your_alpaca_api_key_here
+ALPACA_SECRET_KEY=your_alpaca_secret_key_here
+ALPACA_PAPER=true
 
-# ── Paper trading (step 2 — uncomment when ready) ─────────
-# TRADER_BROKER=alpaca
-# ALPACA_API_KEY=your_alpaca_api_key_here
-# ALPACA_SECRET_KEY=your_alpaca_secret_key_here
-# ALPACA_PAPER=true
-
-# ── Strategy ──────────────────────────────────────────────
+# Strategy:
 TRADER_STRATEGY=momentum
-TRADER_ALLOWED_SYMBOLS=ES,NQ          # or S&P500,Nasdaq100 (QS client ≥ 0.6.0)
+TRADER_ALLOWED_SYMBOLS=ES,NQ
 
-# ── Execution ─────────────────────────────────────────────
+# Execution:
 TRADER_EXECUTION_INTERVAL_MINUTES=5
 TRADER_DAILY_START_CAPITAL=100000
-TRADER_CLOSE_ON_EXIT=true
 ```
 
-See [Paper Trading vs Live Trading](#paper-trading-vs-live-trading) for the recommended progression from simulation → paper → live.
-
-### 2. Run the bot
+### 2. Run with Docker Compose
 
 ```bash
-docker run -d \
-  --name live-trader \
-  --env-file .env \
-  --restart unless-stopped \
-  -v ./logs:/app/logs \
-  quantumsignals/live-trader:latest
+docker compose up -d
 ```
 
-The bot starts immediately, streams signals, and executes trades. Logs are saved to the `./logs` folder.
+The bot starts in the background, streams signals, and executes trades. Logs are saved to the `./logs` folder.
 
 ### 3. Check logs
 
 ```bash
 # Follow live output
-docker logs -f live-trader
+docker compose logs -f
 
 # One log file per trading day per process run.
 # Filename = session_<trading-day>_<process-start-time>.log
@@ -80,10 +67,10 @@ ls logs/
 ls logs/session_$(date +%Y-%m-%d)_*.log
 ```
 
-### 4. Stop the bot
+### 4. Stop with Docker Compose
 
 ```bash
-docker stop live-trader
+docker compose stop
 ```
 
 If `TRADER_CLOSE_ON_EXIT=true` (the default), all open positions are automatically flattened on shutdown.
@@ -206,19 +193,6 @@ Discrete intraday strategy that trades **exactly 1 share** per actionable signal
 
 ## Supported Symbols
 
-QuantumSignals may emit signals under **legacy futures tickers** (`ES`, `NQ`) or
-**full names** (`S&P500`, `Nasdaq100`). Client ≥ 0.6.0 may also emit ETF tickers
-(`SPY`, `QQQ`) directly — handled by `momentum` only.
-
-### Signal → execution mapping
-
-| QS signal symbol | Alpaca (ETF) |
-|---|---|
-| `ES`, `S&P500` | SPY |
-| `NQ`, `Nasdaq100` | QQQ |
-| `SPY` | SPY |
-| `QQQ` | QQQ |
-
 Set `TRADER_ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100` or
 `ES,NQ`), not the ETF ticker.
 
@@ -260,46 +234,4 @@ ALPACA_PAPER=true
 # 3. Live trading — only after paper results look correct
 TRADER_BROKER=alpaca
 ALPACA_PAPER=false
-```
-
----
-
-## Using Docker Compose (alternative)
-
-Create a `docker-compose.yml` alongside your `.env` file:
-
-```yaml
-services:
-  trader:
-    image: quantumsignals/live-trader:latest
-    env_file: .env
-    volumes:
-      - ./logs:/app/logs
-    restart: unless-stopped
-```
-
-Then run:
-
-```bash
-docker compose up -d       # start
-docker compose logs -f     # follow logs
-docker compose down        # stop
-```
-
----
-
-## Updating
-
-Pull the latest image and restart:
-
-```bash
-docker pull quantumsignals/live-trader:latest
-docker stop live-trader && docker rm live-trader
-# re-run the docker run command from Quick Start
-```
-
-Or with Docker Compose:
-
-```bash
-docker compose pull && docker compose up -d
 ```
