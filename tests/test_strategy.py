@@ -475,11 +475,16 @@ class TestMomentumStrategy:
             # cross zero in both directions
             (3.5, -2.0, 3.5, [("SELL", 3.5, "close"), ("SELL", 2.0, "open")]),
             (-3.0, 2.5, 3.0, [("BUY", 3.0, "close"), ("BUY", 2.5, "open")]),
-            # long dust → short: close the dust, open whole shares (June 29 2026)
+            # long dust → short
             (0.000099994, -1.0, 0.000099994,
              [("SELL", 0.000099994, "close"), ("SELL", 1.0, "open")]),
-            # short dust → long: cover the dust, then open (July 2026)
+            # short dust → long
             (-1e-8, 5.0, 1e-8, [("BUY", 1e-8, "close"), ("BUY", 5.0, "open")]),
+            # short dust → more short
+            (-0.0001, -2.0, 0.0001,
+             [("BUY", 0.0001, "close"), ("SELL", 2.0, "open")]),
+            # cover absorbs leftover dust
+            (-2.0, -0.0001, 2.0, [("BUY", 2.0, "close")]),
             # close capped to what the broker has available
             (5.0, 0.0, 3.809, [("SELL", 3.809, "close")]),
             # opposite side not clearable → close-only progress, no open leg
@@ -534,6 +539,31 @@ class TestMomentumStrategy:
             f"must agree after extending a short"
         )
         assert qqq_pos == -36.0 - sold
+
+    def test_short_dust_down_covers_then_opens_whole_short(self):
+        """Cover fractional short residue before opening a whole-share short."""
+        strategy, broker, _perf = self._make_strategy(
+            broker="alpaca",
+            allowed_symbols=["NQ"],
+            daily_start_capital=100_000,
+        )
+        broker._sim_positions["QQQ"] = {"pos": -0.0001, "avg_cost": 470.98}
+        strategy.sync_positions()
+
+        _fire(strategy, "NQ", Signal.DOWN)
+
+        buy_orders = [o for o in broker._orders if o["action"] == "BUY"]
+        sell_orders = [o for o in broker._orders if o["action"] == "SELL"]
+        assert len(buy_orders) == 1 and buy_orders[0]["position_intent"] == "close"
+        assert abs(float(buy_orders[0]["qty"]) - 0.0001) < 1e-9
+        assert len(sell_orders) == 1 and sell_orders[0]["position_intent"] == "open"
+        sold = float(sell_orders[0]["qty"])
+        assert abs(sold - round(sold)) < 1e-9
+        qqq_pos = next(
+            p["pos"] for p in broker.get_open_positions() if p["symbol"] == "QQQ"
+        )
+        assert qqq_pos < 0
+        assert abs(qqq_pos - round(qqq_pos)) < 1e-6
 
     def test_short_dust_up_covers_then_opens_long(self):
         """Regression: sub-lot short dust must cover before buy_to_open (July 2026)."""

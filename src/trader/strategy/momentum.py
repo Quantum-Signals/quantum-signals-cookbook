@@ -478,8 +478,8 @@ def _plan_legs(
     - An open leg is emitted only when the opposite side is fully cleared
       (within ``_DUST_QTY``); otherwise the close leg makes partial progress
       and the next tick re-plans.
-    - Short opens are whole shares (targets are pre-snapped by
-      ``_snap_target``).
+    - Short opens are whole shares. Fractional short residue is covered first
+      so the resulting short is an integer (Alpaca rejects fractional shorts).
     """
     delta = target - current
     if abs(delta) <= _BROKER_EPS:
@@ -496,9 +496,17 @@ def _plan_legs(
         if target < -_DUST_QTY:
             if cur_long - close_qty > _DUST_QTY:
                 return legs  # long not cleared — no short open this tick
-            open_qty = -target - max(-current, 0.0)
+            remaining_short = max(-current, 0.0)
+            frac = _fractional_short_remainder(current)
+            if frac > _BROKER_EPS:
+                cover = _floor_leg(min(frac, avail_close), use_fractional)
+                if cover <= _BROKER_EPS or frac - cover > _DUST_QTY:
+                    return legs
+                legs.append(_Leg("BUY", cover, "close"))
+                remaining_short -= cover
+            open_qty = -target - remaining_short
             if use_fractional:
-                open_qty = float(round(open_qty))  # whole-share shorts only
+                open_qty = float(round(open_qty))
             if open_qty > _BROKER_EPS:
                 legs.append(_Leg("SELL", open_qty, "open"))
     else:  # buying
@@ -506,6 +514,9 @@ def _plan_legs(
         cur_short = max(-current, 0.0)
         closeable = min(cur_short, avail_close)
         close_qty = _floor_leg(min(buy_total, closeable), use_fractional)
+        leftover = cur_short - close_qty  # absorb dust so the remaining short stays whole
+        if close_qty > _BROKER_EPS and 0 < leftover <= _DUST_QTY:
+            close_qty = _floor_leg(min(cur_short, closeable), use_fractional)
         if close_qty > _BROKER_EPS:
             legs.append(_Leg("BUY", close_qty, "close"))
         if target > _DUST_QTY:
@@ -517,6 +528,14 @@ def _plan_legs(
             if open_qty > _DUST_QTY:
                 legs.append(_Leg("BUY", open_qty, "open"))
     return legs
+
+
+def _fractional_short_remainder(qty: float) -> float:
+    """Fractional part of a short position; 0 if flat, long, or a whole short."""
+    if qty >= -_BROKER_EPS:
+        return 0.0
+    short = -qty
+    return short - math.floor(short + 1e-12)
 
 
 def _floor_leg(qty: float, use_fractional: bool) -> float:
