@@ -20,7 +20,7 @@ An algorithmic trading bot that streams real-time signals from [QuantumSignals](
 
 ### 1. Create your `.env` file
 
-Copy `.env.example` or create a new `.env` file in the project folder. 
+Copy `.env.example` or create a new `.env` file in the project folder.
 
 ```env
 # Required:
@@ -44,10 +44,10 @@ TRADER_DAILY_START_CAPITAL=100000
 ### 2. Run with Docker Compose
 
 ```bash
-docker compose up -d
+docker compose up
 ```
 
-The bot starts in the background, streams signals, and executes trades. Logs are saved to the `./logs` folder.
+The bot starts in the foreground, streams signals, and executes trades. Logs are saved to the `./logs` folder.
 
 ### 3. Check logs
 
