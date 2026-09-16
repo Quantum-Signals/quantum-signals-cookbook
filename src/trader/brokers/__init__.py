@@ -3,7 +3,7 @@ from __future__ import annotations
 from importlib.metadata import entry_points
 from typing import Callable
 
-from qs_trader_broker_core import BrokerBase
+from qs_trader_broker_core.base import BrokerBase
 
 from trader.config import Settings
 

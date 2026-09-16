@@ -10,7 +10,14 @@ from loguru import logger
 from requests.exceptions import ReadTimeout, ConnectionError
 from urllib3.exceptions import ProtocolError
 from trader.config import Settings
-from qs_trader_broker_core import BrokerBase, normalize_position_side
+from qs_trader_broker_core.base import BrokerBase, normalize_position_side
+from qs_trader_symbols import (
+    canonicalize,
+    is_symbol_allowed,
+    parse_allowed_symbols,
+    position_symbol_to_canonical,
+    trading_targets,
+)
 from trader.models import PerformanceTracker, Signal, sig_label
 from trader.strategy.base import StrategyBase
 
@@ -24,30 +31,12 @@ _DUST_QTY = 1e-4
 # must still be closed before opening the opposite side.
 _BROKER_EPS = 1e-9
 
-_SIGNAL_TO_TRADE: dict[str, str] = {
-    # QS client < 0.5.1 used futures tickers; >= 0.5.1 uses full names
-    "ES": "SPY",
-    "NQ": "QQQ",
-    "S&P500": "SPY",
-    "Nasdaq100": "QQQ",
-    # v3 endpoint (client >= 0.6.0) may emit the ETF ticker directly as symbol
-    "SPY": "SPY",
-    "QQQ": "QQQ",
-}
-
-# Reverse map: ETF ticker → canonical QS signal symbol (used by sync_positions).
-# Prefer the futures-ticker key so internal state stays consistent with older logs.
-_TRADE_TO_SIGNAL: dict[str, str] = {
-    "SPY": "ES",
-    "QQQ": "NQ",
-}
-
-
 def _compute_order_qty(
     interval_minutes: int,
     price: float,
     target_daily_notional: float,
     use_fractional: bool = False,
+    multiplier: float = 1.0,
 ) -> float:
     """Return the per-execution order size so a symbol's daily notional ≈ target_daily_notional.
 
@@ -57,12 +46,14 @@ def _compute_order_qty(
       whole-share:  qty = round(1.1776) = 1 share
 
     Doubling the interval halves executions/day and doubles qty, keeping
-    daily notional constant.
+    daily notional constant.  *multiplier* is the futures point value
+    (MES=5, MNQ=2); equities stay 1.
     """
     executions_per_day = _TRADING_MINUTES_PER_DAY // interval_minutes
-    if executions_per_day <= 0 or price <= 0:
+    point_value = price * (multiplier if multiplier > 0 else 1.0)
+    if executions_per_day <= 0 or point_value <= 0:
         return 0.0001 if use_fractional else 1.0
-    raw = target_daily_notional / (executions_per_day * price)
+    raw = target_daily_notional / (executions_per_day * point_value)
     if use_fractional:
         return round(raw, 4)  # Alpaca accepts up to 9 d.p.; 4 is plenty
     return float(max(1, round(raw)))
@@ -128,14 +119,9 @@ class MomentumStrategy(StrategyBase):
         # supports_fractional gets fractional sizing (see BrokerBase).
         self._use_fractional = broker.supports_fractional
 
-        self._allowed: set[str] = set(settings.allowed_symbols) if settings.allowed_symbols else set()
+        self._allowed = parse_allowed_symbols(settings.allowed_symbols)
 
-        # Active tradeable symbols = those in _SIGNAL_TO_TRADE that pass the allow-list.
-        active_symbols = (
-            [s for s in _SIGNAL_TO_TRADE if s in self._allowed]
-            if self._allowed
-            else list(_SIGNAL_TO_TRADE)
-        )
+        active_symbols = trading_targets(self._allowed)
         n_symbols = max(len(active_symbols), 1)
         self._target_daily_notional_per_symbol = settings.daily_start_capital / n_symbols
 
@@ -215,7 +201,7 @@ class MomentumStrategy(StrategyBase):
             etf_sym = p["symbol"]
             # Internal state is keyed by QS signal symbol ("ES"/"NQ"), not the
             # ETF ticker ("SPY"/"QQQ").  Map back so handle_signal() finds it.
-            sig_sym = _TRADE_TO_SIGNAL.get(etf_sym, etf_sym)
+            sig_sym = position_symbol_to_canonical(etf_sym) or etf_sym
             qty = float(p["qty"])
             avg_price = p["avg_price"]
             if qty == 0:
@@ -247,13 +233,14 @@ class MomentumStrategy(StrategyBase):
             logger.debug(f"Signal  {sym}  model={signal.model}  -- {signal.code_message}")
             return
 
-        if self._allowed and sym not in self._allowed:
+        if not is_symbol_allowed(sym, self._allowed):
             logger.debug(f"  -> {sym} not in ALLOWED_SYMBOLS — skipping")
             return
 
-        if sym not in _SIGNAL_TO_TRADE:
-            logger.debug(f"  -> {sym} has no ETF mapping — skipping")
-            return
+        canon = canonicalize(sym)
+        if canon is None:
+            # Passthrough symbol (not in catalog) — broker resolves directly.
+            canon = sym
 
         self.perf.signal_counts[sig] += 1
         logger.info(f"Signal  {sym}  {sig_label(sig)}  model={signal.model}  ts={ts}")
@@ -267,91 +254,94 @@ class MomentumStrategy(StrategyBase):
         # that aren't visible in the log but cause the 5-min boundary to be
         # missed by <1 s, making the effective interval 6 min instead of 5 min.
         signal_ts = math.floor(_signal_ts_epoch(ts))
-        elapsed = signal_ts - self._last_exec_time.get(sym, 0.0)
+        elapsed = signal_ts - self._last_exec_time.get(canon, 0.0)
         if elapsed < self._interval_s:
             remaining = self._interval_s - elapsed
             logger.debug(
-                f"  -> Next execution for {sym} in {remaining:.0f}s — skipping"
+                f"  -> Next execution for {canon} in {remaining:.0f}s — skipping"
             )
             return
 
         if sig == Signal.STABLE:
-            net = self._net_qty.get(sym, 0.0)
-            logger.info(f"  -> STABLE — holding {sym} (net: {_fmt_signed_qty(net)})")
-            self._last_exec_time[sym] = signal_ts
+            net = self._net_qty.get(canon, 0.0)
+            logger.info(f"  -> STABLE — holding {canon} (net: {_fmt_signed_qty(net)})")
+            self._last_exec_time[canon] = signal_ts
             return
 
-        self._execute(sym, sig, signal_ts)
+        self._execute(canon, sym, sig, signal_ts)
 
     # ------------------------------------------------------------------
     # Execution — reconcile the broker position to the target
     # ------------------------------------------------------------------
-    def _execute(self, sym: str, sig: int, signal_ts: float) -> None:
-        """Move the broker position for *sym* toward this tick's target.
+    def _execute(self, canon: str, qs_symbol: str, sig: int, signal_ts: float) -> None:
+        """Move the broker position for *canon* toward this tick's target.
 
         ``signal_ts`` is the QS signal's UTC epoch (seconds since 1970) and is
         stored in ``_last_exec_time`` so the next cooldown check compares
         signal timestamps — not wall-clock arrival times.
         """
-        trade_sym = _SIGNAL_TO_TRADE[sym]
-        contract = self.broker.resolve_contract(trade_sym)
+        contract = self.broker.resolve_contract(qs_symbol)
         if contract is None:
             logger.warning(
-                f"  -> No tradable contract for {trade_sym} — skipping "
+                f"  -> No tradable contract for {qs_symbol} — skipping "
                 f"(check symbol map / contract month / IB permissions)"
             )
             return
 
-        price = self._fetch_price(trade_sym, contract)
+        pos_sym = _position_symbol(contract, qs_symbol)
+        label = _instrument_label(contract, qs_symbol)
+
+        price = self._fetch_price(label, contract)
         if price is None:
-            logger.warning(f"  -> No market data for {trade_sym} — skipping")
+            logger.warning(f"  -> No market data for {label} — skipping")
             return
 
         slice_qty = _compute_order_qty(
             self._interval_minutes, price,
             self._target_daily_notional_per_symbol,
             self._use_fractional,
+            self._settings.contract_multipliers.get(pos_sym, 1.0),
         )
         signed_slice = slice_qty if sig == Signal.UP else -slice_qty
 
-        self._last_exec_time[sym] = signal_ts
+        self._last_exec_time[canon] = signal_ts
 
         # The broker is the only source of truth for the current position.
-        current, avail_close, avg_entry = _broker_state(self.broker, trade_sym)
+        current, avail_close, avg_entry = _broker_state(self.broker, pos_sym)
 
-        known = self._net_qty.get(sym, 0.0)
+        known = self._net_qty.get(canon, 0.0)
         if abs(current - known) > _DUST_QTY:
             logger.warning(
-                f"  -> {trade_sym} drift: strategy believed "
+                f"  -> {label} drift: strategy believed "
                 f"{_fmt_signed_qty(known)}, broker holds {_fmt_signed_qty(current)} "
                 f"— planning from broker"
             )
 
-        reserve = self._position_reserve.get(sym, 0.0)
+        reserve = self._position_reserve.get(canon, 0.0)
         ideal = current + reserve + signed_slice
         target, new_reserve = _snap_target(ideal, self._use_fractional)
-        self._position_reserve[sym] = new_reserve
+        self._position_reserve[canon] = new_reserve
 
         legs = _plan_legs(current, target, avail_close, self._use_fractional)
 
         if not legs:
             direction = "short" if signed_slice < 0 else "long"
             logger.info(
-                f"  -> No order for {trade_sym}: accumulating {direction} intent "
+                f"  -> No order for {label}: accumulating {direction} intent "
                 f"(reserve={_fmt_signed_qty(new_reserve)}, "
                 f"net stays at {_fmt_signed_qty(current)})"
             )
-            self._settle(sym, price, current, avg_entry, current)
+            self._settle(canon, price, current, avg_entry, current)
             return
 
         new_net = current
         prev_intent: Optional[str] = None
         for leg in legs:
             if leg.intent == "open" and prev_intent == "close":
-                if not _wait_opposite_cleared(self.broker, trade_sym, leg.action):
+                if not _wait_opposite_cleared(self.broker, pos_sym, leg.action):
                     logger.warning(
                         f"  -> Broker still shows the opposite position for "
-                        f"{trade_sym} after close — skipping open leg"
+                        f"{pos_sym} after close — skipping open leg"
                     )
                     break
             trade = self.broker.place_order(
@@ -359,21 +349,23 @@ class MomentumStrategy(StrategyBase):
             )
             if trade is None:
                 logger.warning(
-                    f"  -> {leg.action} {_fmt_qty(leg.qty)}x {trade_sym} failed — "
+                    f"  -> {leg.action} {_fmt_qty(leg.qty)}x {label} failed — "
                     f"dropping the rest of this slice; next interval re-plans "
                     f"from the broker position"
                 )
                 break
             signed_qty = leg.qty if leg.action == "BUY" else -leg.qty
+            multiplier = self._settings.contract_multipliers.get(pos_sym, 1.0)
             logger.info(
-                f"  -> {leg.action} {_fmt_qty(leg.qty)}x {trade_sym} @ {price:.2f}  "
-                f"notional=${leg.qty * price:,.2f}  ({_leg_label(leg)})  [signal={sym}]  "
+                f"  -> {leg.action} {_fmt_qty(leg.qty)}x {label} @ {price:.2f}  "
+                f"notional=${leg.qty * price * multiplier:,.2f}  "
+                f"({_leg_label(leg)})  [signal={canon}]  "
                 f"(net: {_fmt_signed_qty(new_net)} → {_fmt_signed_qty(new_net + signed_qty)})"
             )
             new_net += signed_qty
             prev_intent = leg.intent
 
-        self._settle(sym, price, current, avg_entry, new_net)
+        self._settle(canon, price, current, avg_entry, new_net)
 
         if abs(new_reserve) > 1e-9:
             logger.info(f"  -> (reserve: {_fmt_signed_qty(new_reserve)})")
@@ -535,9 +527,35 @@ def _floor_leg(qty: float, use_fractional: bool) -> float:
     return floored
 
 
-# ------------------------------------------------------------------
-# Broker state helpers
-# ------------------------------------------------------------------
+def _position_symbol(contract: object, fallback: str) -> str:
+    """Symbol used in broker position dicts for *contract*.
+
+    Alpaca contracts are ticker strings. Simulated contracts use ``.symbol``.
+    Other brokers may expose ``position_key`` or ``root``.
+    """
+    if isinstance(contract, str):
+        return contract
+    key = getattr(contract, "position_key", None) or getattr(contract, "root", None)
+    if key:
+        return str(key)
+    symbol = getattr(contract, "symbol", None)
+    return str(symbol) if symbol else fallback
+
+
+def _instrument_label(contract: object, fallback: str) -> str:
+    """Name to print in logs: the instrument actually sent to the broker.
+
+    Alpaca contracts are ticker strings (``SPY``). Simulated contracts use
+    ``.symbol``. Other brokers may expose ``trading_symbol``.
+    """
+    if isinstance(contract, str):
+        return contract
+    trading = getattr(contract, "trading_symbol", None)
+    if trading:
+        return str(trading)
+    symbol = getattr(contract, "symbol", None)
+    return str(symbol) if symbol else fallback
+
 
 def _broker_position(broker: BrokerBase, etf_symbol: str) -> dict | None:
     """Return the broker position dict for *etf_symbol*, or None if flat."""

@@ -11,6 +11,7 @@ owning its broker SDK:
 
 | Package | Module | Provides | SDK dep |
 |---------|--------|----------|---------|
+| `qs-trader-symbols` | `qs_trader_symbols` | QS symbol catalog, alias normalization, broker map helpers | — |
 | `qs-trader-broker-core` | `qs_trader_broker_core` | `BrokerBase`, `OrderResult`, `SimulatedBroker` | — |
 | `qs-trader-broker-alpaca` | `qs_trader_broker_alpaca` | `AlpacaBroker`, `AlpacaSettings` (`ALPACA_*`) | `alpaca-py` |
 
@@ -42,16 +43,18 @@ editing entry points so the metadata is rewritten.)
 
 ## Dependency graph (a DAG — no import cycle)
 
-Broker packages depend on `qs-trader-broker-core`, **never on the app**. Each
-broker owns and self-loads its own configuration from namespaced env vars via
-`pydantic-settings`, so `create_broker()` constructs it with no arguments and
-the app passes it no config. The app's `Settings` only decides *which* broker to
-run (`TRADER_BROKER`).
+Broker packages depend on `qs-trader-broker-core` (and transitively
+`qs-trader-symbols`), **never on the app**. Each broker owns and self-loads its
+own configuration from namespaced env vars via `pydantic-settings`, so
+`create_broker()` constructs it with no arguments and the app passes it no
+config. The app's `Settings` only decides *which* broker to run
+(`TRADER_BROKER`).
 
 ```
-trader (app) ──→ qs-trader-broker-core ←── qs-trader-broker-alpaca
-     │
-     └──→ alpaca package (default install)
+trader (app) ──→ qs-trader-symbols
+     │                ↑
+     ├──→ qs-trader-broker-core ──→ qs-trader-symbols
+     └──→ qs-trader-broker-alpaca ──→ qs-trader-broker-core
 ```
 
 ## The `BrokerBase` interface
@@ -77,13 +80,15 @@ never touch broker-native objects.
 
 ## Symbol maps
 
-Each broker owns its own symbol map as a class attribute — open one broker file
-to see how it maps QS symbols:
+QuantumSignals symbol names (canonical keys and every stream alias) live in
+one catalog: `qs_trader_symbols`. Each broker builds its tradable map from
+that catalog:
 
 | Map | Location | Purpose |
 |-----|----------|---------|
-| `AlpacaBroker.DEFAULT_SYMBOL_MAP` | `qs_trader_broker_alpaca` | QS symbol → tradable ETF/stock ticker |
-| `SimulatedBroker.DEFAULT_SYMBOL_MAP` / `.DEFAULT_PRICES` | `qs_trader_broker_core` | Dry-run contract shapes & price seeds |
+| `INSTRUMENTS` / `canonicalize()` | `qs_trader_symbols` | QS alias → canonical key (`ES`, `NQ`, …) |
+| `AlpacaBroker.DEFAULT_SYMBOL_MAP` | built via `alpaca_symbol_map()` | QS alias → tradable ETF/stock ticker |
+| `SimulatedBroker.DEFAULT_SYMBOL_MAP` | built via `simulated_symbol_map()` | Dry-run contract shapes; `.DEFAULT_PRICES` seeds quotes |
 
 Each broker accepts an optional `symbol_map` (and the simulator, `sim_prices`)
 constructor override for tests; the app never passes one, so the broker's own
@@ -94,15 +99,17 @@ and stay in the app's `config.py`.)
 
 A broker is its own package (in-tree under `src/brokers/`, or external):
 
-1. **Create a package** that depends on `qs-trader-broker-core`. In-tree, add a
-   directory under `src/brokers/`; the workspace glob picks it up.
+1. **Create a package** that depends on `qs-trader-broker-core` and
+   `qs-trader-symbols`. In-tree, add a directory under `src/brokers/`; the
+   workspace glob picks it up.
 2. **Define settings** — a `pydantic-settings` `BaseSettings` with a namespaced
    `env_prefix` (e.g. `MYBROKER_`). Do **not** import `trader` — that keeps the
    package graph a DAG.
-3. **Subclass `BrokerBase`** — implement the abstract methods and own a
-   `DEFAULT_SYMBOL_MAP`. Make `__init__(self, settings=None)` self-load its
-   settings (`settings or MyBrokerSettings()`) so `create_broker()` can build it
-   with no arguments.
+3. **Subclass `BrokerBase`** — implement the abstract methods and build
+   `DEFAULT_SYMBOL_MAP` from `qs_trader_symbols` (or a custom map). Make
+   `__init__(self, settings=None)` self-load its settings
+   (`settings or MyBrokerSettings()`) so `create_broker()` can build it with no
+   arguments.
 4. **Register the entry point** in the package's own `pyproject.toml`:
    ```toml
    [project.entry-points.qs_trader_brokers]

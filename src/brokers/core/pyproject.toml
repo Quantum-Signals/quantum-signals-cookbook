@@ -6,7 +6,11 @@ requires-python = ">=3.12"
 dependencies = [
     "loguru>=0.7.3",
     "pydantic-settings>=2.0",
+    "qs-trader-symbols",
 ]
+
+[tool.uv.sources]
+qs-trader-symbols = { workspace = true }
 
 # The always-available simulated broker registers itself the same way an
 # external broker package would.

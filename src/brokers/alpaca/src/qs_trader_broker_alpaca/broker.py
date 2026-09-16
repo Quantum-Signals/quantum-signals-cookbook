@@ -6,13 +6,10 @@ from typing import Any, Optional
 
 from loguru import logger
 
-from qs_trader_broker_core import (
-    BrokerBase,
-    OrderResult,
-    normalize_position_side,
-)
+from qs_trader_broker_core.base import BrokerBase, OrderResult, normalize_position_side
+from qs_trader_symbols import aliases_for_canonical, alpaca_symbol_map
 
-from qs_trader_broker_alpaca.settings import AlpacaSettings
+from .settings import AlpacaSettings
 
 # Alpaca's RESTClient uses ``requests.Session`` without per-call timeouts, so a
 # stalled TCP connection can block the main trading loop forever (e.g. during
@@ -57,15 +54,7 @@ class AlpacaBroker(BrokerBase):
     # rejected by Alpaca (code 42210000) and handled per-leg in the strategy.
     supports_fractional: bool = True
 
-    DEFAULT_SYMBOL_MAP: dict[str, str] = {
-        "ES": "SPY",
-        "NQ": "QQQ",
-        "S&P500": "SPY",
-        "Nasdaq100": "QQQ",
-        "SPY": "SPY",
-        "QQQ": "QQQ",
-        "AAPL": "AAPL",
-    }
+    DEFAULT_SYMBOL_MAP: dict[str, str] = alpaca_symbol_map()
 
     def __init__(
         self,
@@ -109,6 +98,52 @@ class AlpacaBroker(BrokerBase):
     def disconnect(self) -> None:
         # Alpaca is REST-based; no persistent socket to close.
         logger.info("Alpaca broker disconnected (REST — nothing to tear down)")
+
+    def startup_entitlement_warnings(self, canonical_symbols: list[str]) -> list[str]:
+        """Account- and asset-level checks (once at startup, not per order)."""
+        warnings = super().startup_entitlement_warnings(canonical_symbols)
+        client = self._trading_client
+        if client is None:
+            warnings.append("Alpaca client not connected — asset checks skipped")
+            return warnings
+
+        try:
+            account = client.get_account()
+        except Exception as exc:
+            warnings.append(f"Could not load Alpaca account: {exc}")
+            return warnings
+
+        if getattr(account, "account_blocked", False):
+            warnings.append("Alpaca account is blocked")
+        if getattr(account, "trading_blocked", False):
+            warnings.append("Alpaca trading is blocked on this account")
+
+        for canon in canonical_symbols:
+            ticker = self._resolve_ticker_for_canonical(canon)
+            if ticker is None:
+                continue  # super() already warned
+            try:
+                asset = client.get_asset(ticker)
+            except Exception as exc:
+                warnings.append(f"Alpaca cannot load asset {ticker} ({canon}): {exc}")
+                continue
+            if not getattr(asset, "tradable", True):
+                warnings.append(f"Alpaca asset {ticker} ({canon}) is not tradable")
+            status = getattr(asset, "status", None)
+            status_value = getattr(status, "value", status)
+            if status_value and str(status_value).lower() not in ("active", "assetstatus.active"):
+                warnings.append(
+                    f"Alpaca asset {ticker} ({canon}) status is {status_value!r}, not active"
+                )
+
+        return warnings
+
+    def _resolve_ticker_for_canonical(self, canonical: str) -> Optional[str]:
+        for alias in sorted(aliases_for_canonical(canonical) or {canonical}):
+            ticker = self.resolve_contract(alias)
+            if ticker:
+                return ticker
+        return None
 
     # ------------------------------------------------------------------
     # Contract resolution

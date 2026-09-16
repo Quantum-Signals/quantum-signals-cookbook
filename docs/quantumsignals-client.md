@@ -1,8 +1,8 @@
 # QuantumSignals Python Client — Quickstart
 
-Get started with the QuantumSignals API using the official Python client (`quantumsignals-client` ≥ 0.6.0).
+Get started with the QuantumSignals API using the official Python client (`quantumsignals-client` ≥ 0.9.0).
 
-**Live trader integration:** this repo's bot consumes the signal stream automatically — see [README.md](README.md) for Docker deployment and [documentation.md](documentation.md) for how signals map to orders.
+**Live trader integration:** this repo's bot consumes the signal stream automatically — see [README.md](README.md) for Docker deployment and [architecture.md](architecture.md) for how signals map to orders.
 
 ---
 
@@ -43,22 +43,28 @@ client = Client(api_key=os.environ["QUANTUMSIGNALS_API_KEY"])
 
 ---
 
-## Step 2: Fetch Available Models
+## Step 2: Browse the Signal Catalog
+
+Commerce signals are identified by a **signal_id** slug (e.g. `5min_sp500`). The catalog describes each signal's metadata, including the symbol name emitted on the stream.
 
 ```python
-models = client.get_model_catalog()
+catalog = client.get_signal_catalog()
+subscriptions = client.get_subscriptions()
+subscribed_ids = {sub.signal_id for sub in subscriptions}
 
-for model_id, model in models.items():
-    print(f"Model: {model_id}")
-    print(f"  Symbols: {', '.join(model.trained_on_symbols)}")
-    print(f"  Training period: {model.trained_date_range[0]} to {model.trained_date_range[1]}")
+for signal_id, meta in catalog.items():
+    sym = meta.model_output_symbol or "?"
+    sub = "subscribed" if signal_id in subscribed_ids else "not subscribed"
+    print(f"{signal_id}: {sym} ({sub})")
 ```
 
-Use `trained_on_symbols` to see which symbol names your models emit — important for setting `ALLOWED_SYMBOLS` in the live trader.
+Use `model_output_symbol` to see which symbol names your signals emit — important for setting `TRADER_ALLOWED_SYMBOLS` in the live trader.
 
 ---
 
 ## Step 3: Stream Trading Signals
+
+The live stream uses the v3 signals endpoint. By default you receive every signal your API key is entitled to; pass `signals=[...]` to filter by signal_id slug.
 
 ```python
 for signal in client.stream_signals():
@@ -70,12 +76,20 @@ for signal in client.stream_signals():
         print(f"  → SELL signal for {signal.symbol}")
 ```
 
+Filter to specific signals:
+
+```python
+for signal in client.stream_signals(signals=["5min_sp500", "5min_nq"]):
+    print(f"{signal.signal_id} {signal.symbol}: {signal.signal}")
+```
+
 The client handles SSE parsing, reconnection, and connection management.
 
 Each signal object includes at minimum:
 
 | Field | Description |
 |---|---|
+| `signal_id` | Commerce slug for this signal (e.g. `5min_sp500`) |
 | `symbol` | Instrument name (see [Symbol names](#symbol-names) below) |
 | `signal` | `0` = DOWN, `1` = STABLE, `2` = UP |
 | `signal_time_utc` | UTC timestamp for the signal bar |
@@ -84,43 +98,45 @@ Each signal object includes at minimum:
 
 ---
 
+## Pull Recent Signals
+
+For one-off reads instead of a live stream:
+
+```python
+recent = client.get_recent_signals(signals=["5min_sp500"], last=10)
+for signal in recent.signals:
+    print(signal.signal_time_utc, signal.symbol, signal.signal)
+```
+
+---
+
 ## Symbol names
 
-QuantumSignals has used several symbol formats across API versions. The live trader accepts all of these in `ALLOWED_SYMBOLS` and maps them to tradable instruments:
+QuantumSignals may emit several alias formats for the same instrument. The live trader accepts all of these in `TRADER_ALLOWED_SYMBOLS` and maps them to tradable instruments:
 
 | Format | Examples | Notes |
 |---|---|---|
-| Legacy futures tickers | `ES`, `NQ` | Original stream format |
-| Full index names | `S&P500`, `Nasdaq100` | Client ≥ 0.5.1; preferred in backtest APIs |
-| ETF tickers | `SPY`, `QQQ` | Client ≥ 0.6.0 / v3 endpoint; handled by `momentum` strategy |
+| Futures roots | `ES`, `NQ` | Common stream format |
+| Full index names | `S&P500`, `Nasdaq100` | Also used in catalog metadata |
+| ETF tickers | `SPY`, `QQQ` | Mapped by the `momentum` strategy on Alpaca |
 
-When querying backtests, either form usually works:
-
-```python
-symbol = "S&P500"   # preferred
-symbol = "ES"       # legacy alias
-```
-
-Set `ALLOWED_SYMBOLS` using the **QS signal name**, not the ETF ticker the bot trades on Alpaca (e.g. `S&P500,Nasdaq100`, not `SPY,QQQ`).
+Set `TRADER_ALLOWED_SYMBOLS` using the **QS signal symbol**, not necessarily the ETF ticker the bot trades on Alpaca (e.g. `S&P500,Nasdaq100`, not `SPY,QQQ`).
 
 ---
 
 ## Step 4: Fetch Backtest Results
 
-```python
-model_family = "Pythia-bB8ES"
-symbol = "S&P500"
+Backtests are keyed by **signal_id**:
 
-metadata = client.get_backtest_metadata(
-    model_family=model_family,
-    symbol=symbol,
-)
+```python
+signal_id = "5min_sp500"
+
+metadata = client.get_backtest_metadata(signal_id=signal_id)
 print(f"Data available: {metadata['min_date']} to {metadata['max_date']}")
 print(f"Total rows: {metadata['row_count']}")
 
 results = client.get_historical_predictions(
-    model_family=model_family,
-    symbol=symbol,
+    signal_id=signal_id,
     format="json",
     page=1,
     page_size=100,
@@ -130,8 +146,7 @@ for row in results["data"]:
     print(f"Time: {row['signal_time_utc']}, Prediction: {row['prediction']}, Label: {row['label']}")
 
 daily = client.get_daily_backtests(
-    model_family=model_family,
-    symbol=symbol,
+    signal_id=signal_id,
     format="json",
 )
 
@@ -149,14 +164,15 @@ from quantumsignals.client import Client, APIError
 client = Client(api_key="qsk_your_api_key_here")
 
 try:
-    print("Available models:")
-    models = client.get_model_catalog()
-    for model_id, model in models.items():
-        print(f"  - {model_id}: {', '.join(model.trained_on_symbols)}")
+    catalog = client.get_signal_catalog()
+    subscriptions = client.get_subscriptions()
+    print(f"Signal catalog: {len(catalog)} visible, {len(subscriptions)} subscribed")
+    for signal_id, meta in catalog.items():
+        print(f"  - {signal_id}: {meta.model_output_symbol}")
 
     print("\nStreaming signals (Ctrl+C to stop)...")
     for signal in client.stream_signals():
-        print(f"{signal.signal_time_utc} | {signal.symbol}: {signal.signal}")
+        print(f"{signal.signal_time_utc} | {signal.signal_id} | {signal.symbol}: {signal.signal}")
 
         if signal.is_null_signal():
             continue
@@ -179,8 +195,8 @@ finally:
 from quantumsignals.client import Client
 
 with Client(api_key="qsk_your_api_key_here") as client:
-    models = client.get_model_catalog()
-    print(f"Found {len(models)} models")
+    catalog = client.get_signal_catalog()
+    print(f"Found {len(catalog)} signals")
 
     for signal in client.stream_signals():
         process_signal(signal)
@@ -193,7 +209,7 @@ with Client(api_key="qsk_your_api_key_here") as client:
 
 For non-Python integrations, use raw HTTP with `httpx`. The Python client is still recommended — it handles auth, SSE parsing, and errors.
 
-### Getting models
+### Signal catalog
 
 ```python
 import httpx
@@ -201,10 +217,10 @@ import httpx
 API_KEY = "your-api-key-here"
 BASE_URL = "https://api.quantumsignals.ai"
 
-async def get_models():
+async def get_signal_catalog():
     async with httpx.AsyncClient() as client:
         response = await client.get(
-            f"{BASE_URL}/v2/models",
+            f"{BASE_URL}/v3/commerce/catalog",
             headers={"x-api-key": API_KEY},
         )
         response.raise_for_status()
@@ -221,7 +237,7 @@ async def stream_signals():
     async with httpx.AsyncClient() as client:
         async with client.stream(
             "GET",
-            f"{BASE_URL}/v2/signals",
+            f"{BASE_URL}/v3/signals",
             headers={"x-api-key": API_KEY},
             timeout=None,
         ) as response:
@@ -237,13 +253,12 @@ async def stream_signals():
 ### Backtest endpoints
 
 ```python
-async def get_historical_predictions(model_family: str, symbol: str):
+async def get_historical_predictions(signal_id: str):
     async with httpx.AsyncClient() as client:
         response = await client.get(
-            f"{BASE_URL}/v2/backtest/historical_minute_predictions",
+            f"{BASE_URL}/v3/backtest/historical_minute_predictions",
             params={
-                "model_family": model_family,
-                "symbol": symbol,
+                "signal_id": signal_id,
                 "format": "json",
                 "page": 1,
                 "page_size": 100,
@@ -253,9 +268,7 @@ async def get_historical_predictions(model_family: str, symbol: str):
         response.raise_for_status()
         return response.json()
 
-# Usage — either symbol form works
-predictions = await get_historical_predictions("Pythia-bB8ES", "S&P500")
-predictions = await get_historical_predictions("Pythia-bB8ES", "ES")
+predictions = await get_historical_predictions("5min_sp500")
 ```
 
 ---
@@ -263,7 +276,7 @@ predictions = await get_historical_predictions("Pythia-bB8ES", "ES")
 ## Smoke test in this repo
 
 ```bash
-uv run python scripts/test_qs_connection.py
+uv run python scripts/smoke_qs_connection.py
 ```
 
-Validates your API key and prints the live signal stream without placing any orders.
+Validates your API key, prints the signal catalog, and streams live signals without placing any orders.

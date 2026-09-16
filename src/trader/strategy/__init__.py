@@ -1,5 +1,9 @@
+"""Trading strategies — one module per strategy, all implementing ``StrategyBase``.
+
+Register new strategies in ``app._STRATEGIES`` and select via ``TRADER_STRATEGY``.
+"""
+
 from trader.strategy.base import StrategyBase
 from trader.strategy.momentum import MomentumStrategy
-from trader.strategy.signal_follower import SignalFollowerStrategy
 
-__all__ = ["StrategyBase", "MomentumStrategy", "SignalFollowerStrategy"]
+__all__ = ["StrategyBase", "MomentumStrategy"]

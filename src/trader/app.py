@@ -9,19 +9,18 @@ from datetime import date, datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from loguru import logger
 from quantumsignals.client import Client as QSClient
+from trader.access_control import run_startup_access_checks
 from trader.config import Settings, load_settings
-from trader.brokers import create_broker
-from qs_trader_broker_core import BrokerBase
+from trader.brokers import BrokerBase, create_broker
 from trader.models import PerformanceTracker
 from trader.reporting import report_once
 from trader.strategy.base import StrategyBase
 from trader.strategy.momentum import MomentumStrategy
-from trader.strategy.signal_follower import SignalFollowerStrategy
 from trader.streaming import stream_signals_thread
 
-_STRATEGIES = {
+# Add future strategies here: TRADER_STRATEGY=<name> → StrategyBase subclass.
+_STRATEGIES: dict[str, type[StrategyBase]] = {
     "momentum": MomentumStrategy,
-    "signal_follower": SignalFollowerStrategy,
 }
 
 
@@ -178,16 +177,27 @@ def _humanise_timedelta(td: timedelta) -> str:
     return f"{s}s"
 
 
-def _log_model_catalog(settings: Settings) -> None:
+def _log_signal_catalog(settings: Settings) -> None:
     try:
         with QSClient(api_key=settings.qs_api_key) as qs:
-            models = qs.get_model_catalog()
-            logger.info(f"Available models ({len(models)}):")
-            for model_id, model in models.items():
-                symbols = ", ".join(model.trained_on_symbols)
-                logger.info(f"  {model_id}: {symbols}")
+            catalog = qs.get_signal_catalog()
+            subscriptions = qs.get_subscriptions()
+            subscribed_ids = {sub.signal_id for sub in subscriptions}
+            logger.info(
+                f"QS signal catalog ({len(catalog)} visible, "
+                f"{len(subscriptions)} subscribed):"
+            )
+            for signal_id, meta in sorted(catalog.items()):
+                sym = meta.model_output_symbol or "?"
+                flags = []
+                if signal_id in subscribed_ids:
+                    flags.append("subscribed")
+                if meta.retired:
+                    flags.append("retired")
+                suffix = f" [{', '.join(flags)}]" if flags else ""
+                logger.info(f"  {signal_id}: {sym}{suffix}")
     except Exception as exc:
-        logger.warning(f"Could not fetch model catalog: {exc}")
+        logger.warning(f"Could not fetch signal catalog: {exc}")
 
 
 def _close_all_positions(
@@ -414,7 +424,8 @@ def main() -> None:
         _close_day_log(day_log_id)
         sys.exit(1)
 
-    _log_model_catalog(settings)
+    _log_signal_catalog(settings)
+    run_startup_access_checks(settings, broker)
 
     strategy_cls = _STRATEGIES.get(settings.strategy)
     if strategy_cls is None:

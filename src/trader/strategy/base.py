@@ -14,6 +14,9 @@ class StrategyBase(ABC):
     def tick(self) -> None:
         """Called periodically from the main loop for time-driven work."""
 
+    def sync_positions(self) -> None:
+        """Reconcile strategy state with the broker. Default is a no-op."""
+
     def reset_for_new_day(self) -> None:
         """Clear per-day state before a fresh trading session.
 

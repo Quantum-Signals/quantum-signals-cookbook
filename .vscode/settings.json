@@ -1,0 +1,10 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/src",
+    "${workspaceFolder}/src/symbols/src",
+    "${workspaceFolder}/src/brokers/core/src",
+    "${workspaceFolder}/src/brokers/alpaca/src"
+  ]
+}

@@ -113,7 +113,7 @@ class BrokerBase(ABC):
         self,
         contract: object,
         action: str,
-        qty: int,
+            qty: float,
         price: Optional[float] = None,
         position_intent: Optional[str] = None,
     ) -> Optional[OrderResult]:
@@ -147,3 +147,15 @@ class BrokerBase(ABC):
     def get_positions_for_sync(self) -> list[dict]:
         """Return positions with symbol, signed qty, and average entry price."""
         ...
+
+    def startup_entitlement_warnings(self, canonical_symbols: list[str]) -> list[str]:
+        """Return warnings for symbols this broker cannot trade (startup check only).
+
+        Called once at process start — not on every order. Subclasses override
+        to add broker-specific account/asset checks.
+        """
+        warnings: list[str] = []
+        for canon in canonical_symbols:
+            if self.resolve_contract(canon) is None:
+                warnings.append(f"{canon} has no tradable contract on this broker")
+        return warnings

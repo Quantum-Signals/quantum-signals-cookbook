@@ -15,6 +15,7 @@ members = [
     "live-trader",
     "qs-trader-broker-alpaca",
     "qs-trader-broker-core",
+    "qs-trader-symbols",
 ]
 
 [[package]]
@@ -443,6 +444,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "qs-trader-broker-alpaca" },
     { name = "qs-trader-broker-core" },
+    { name = "qs-trader-symbols" },
     { name = "quantumsignals-client" },
 ]
 
@@ -459,6 +461,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "qs-trader-broker-alpaca", editable = "src/brokers/alpaca" },
     { name = "qs-trader-broker-core", editable = "src/brokers/core" },
+    { name = "qs-trader-symbols", editable = "src/symbols" },
     { name = "quantumsignals-client", specifier = ">=0.9.0" },
 ]
 
@@ -981,6 +984,7 @@ dependencies = [
     { name = "loguru" },
     { name = "pydantic-settings" },
     { name = "qs-trader-broker-core" },
+    { name = "qs-trader-symbols" },
 ]
 
 [package.metadata]
@@ -989,6 +993,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "qs-trader-broker-core", editable = "src/brokers/core" },
+    { name = "qs-trader-symbols", editable = "src/symbols" },
 ]
 
 [[package]]
@@ -998,13 +1003,20 @@ source = { editable = "src/brokers/core" }
 dependencies = [
     { name = "loguru" },
     { name = "pydantic-settings" },
+    { name = "qs-trader-symbols" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "qs-trader-symbols", editable = "src/symbols" },
 ]
+
+[[package]]
+name = "qs-trader-symbols"
+version = "0.1.0"
+source = { editable = "src/symbols" }
 
 [[package]]
 name = "quantumsignals-client"

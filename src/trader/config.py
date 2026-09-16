@@ -10,18 +10,18 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
-# Symbol → broker-native contract mapping lives with each broker that owns it
-# (each broker encodes symbols differently): see AlpacaBroker.DEFAULT_SYMBOL_MAP
-# (QS → ETF ticker) and SimulatedBroker.DEFAULT_SYMBOL_MAP / DEFAULT_PRICES.
-# Contract multipliers are
-# broker-neutral PnL math (used by the app's EOD flatten) and stay here.
+# QS symbol aliases and canonical names live in qs_trader_symbols.
+# Each broker builds its tradable map from that catalog. Contract multipliers
+# are broker-neutral PnL math (used by the app's EOD flatten) and stay here.
 
 # Point-value per contract, used for end-of-day PnL in app.py. Futures carry a
 # contract multiplier; equities/ETFs are 1:1.
 _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
     "ES": 50.0, "NQ": 20.0, "YM": 5.0, "RTY": 50.0,
-    "MES": 5.0, "MNQ": 2.0,
-    "CL": 1000.0, "GC": 100.0, "AAPL": 1.0, "SPY": 1.0, "QQQ": 1.0,
+    "MES": 5.0, "MNQ": 2.0, "MYM": 0.5, "M2K": 5.0,
+    "CL": 1000.0, "GC": 100.0, "SI": 5000.0, "NG": 10000.0,
+    "AAPL": 1.0, "SPY": 1.0, "QQQ": 1.0,
+    "DIA": 1.0, "IWM": 1.0, "USO": 1.0, "GLD": 1.0, "SLV": 1.0, "UNG": 1.0,
 }
 
 
@@ -54,10 +54,11 @@ class Settings(BaseSettings):
     # broker's own connection settings live in its package (e.g. AlpacaSettings).
     broker: str = "simulated"
     max_stream_retries: int = 5
-    strategy: str = "momentum"  # "momentum" or "signal_follower"
-    # Comma-separated in the env var (``TRADER_ALLOWED_SYMBOLS=ES,NQ``); empty =
-    # allow all. NoDecode keeps the raw string so ``_split_symbols`` handles it
-    # instead of pydantic-settings trying to JSON-decode a list.
+    strategy: str = "momentum"
+    # Comma-separated in ``TRADER_ALLOWED_SYMBOLS``. Accepts futures tickers
+    # Futures tickers (``GC``), full QS names (``Gold``), or ETF tickers (``GLD``)
+    # — all equivalent forms map to the same instrument and route to the broker
+    # (e.g. GC→GLD on Alpaca). Empty = allow all catalog symbols.
     allowed_symbols: Annotated[list[str], NoDecode] = []
     close_on_exit: bool = True
     daily_start_capital: float = 1_000_000.0

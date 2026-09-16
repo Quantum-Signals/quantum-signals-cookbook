@@ -4,7 +4,7 @@ Technical guide for engineers inheriting this codebase: system architecture, mod
 
 **Operator quick start (Docker, env vars, deployment):** see [README.md](README.md).
 
-**QuantumSignals API client only:** see [QS documentation.md](QS%20documentation.md).
+**QuantumSignals API client only:** see [quantumsignals-client.md](quantumsignals-client.md).
 
 ---
 
@@ -27,7 +27,7 @@ Technical guide for engineers inheriting this codebase: system architecture, mod
 A long-running Python process that:
 
 1. Streams minute-level ML signals from QuantumSignals (SSE)
-2. Applies a pluggable strategy (`momentum` or `signal_follower`)
+2. Applies the `momentum` strategy (pluggable via `app._STRATEGIES`)
 3. Places orders through the selected broker (`TRADER_BROKER`: `simulated` by default, or a real broker like Alpaca)
 4. Flattens positions at session end and logs daily / run summaries
 
@@ -38,11 +38,11 @@ A long-running Python process that:
 | [README.md](README.md) | Deploy and configure via Docker / `.env` |
 | **documentation.md** (this file) | Code structure and trading logic |
 | [brokers.md](brokers.md) | Broker plugin architecture; add your own broker |
-| [QS documentation.md](QS%20documentation.md) | `quantumsignals-client` API usage |
+| [quantumsignals-client.md](quantumsignals-client.md) | `quantumsignals-client` API usage |
 
 ### Tech stack
 
-Python 3.12+, `uv` (workspace), `loguru`, `python-dotenv`, `pydantic-settings`, `quantumsignals-client` (≥ 0.6.0), `alpaca-py`, `pytest`. (Broker SDKs live in their broker packages.)
+Python 3.12+, `uv` (workspace), `loguru`, `python-dotenv`, `pydantic-settings`, `quantumsignals-client` (≥ 0.9.0), `alpaca-py`, `pytest`. (Broker SDKs live in their broker packages.)
 
 ---
 
@@ -87,7 +87,7 @@ Order of operations in [`src/trader/app.py`](src/trader/app.py):
 | 1 | `_setup_logging()` — stderr + first day log file |
 | 2 | `load_settings()` — `.env` + env vars + optional `--execution-interval` |
 | 3 | `create_broker(settings)` → `broker.connect()` |
-| 4 | `_log_model_catalog()` — QS models (best-effort) |
+| 4 | `_log_signal_catalog()` — QS signal catalog + subscriptions (best-effort) |
 | 5 | Instantiate strategy from `app._STRATEGIES` |
 | 6 | `strategy.sync_positions()` — broker → strategy state |
 | 7 | Start daemon thread `stream_signals_thread()` |
@@ -100,7 +100,7 @@ Order of operations in [`src/trader/app.py`](src/trader/app.py):
 | Cadence | Call | Purpose |
 |---------|------|---------|
 | Continuous | Drain `signal_queue` → `strategy.handle_signal()` | React to QS signals |
-| 1 s | `strategy.tick()` | Time-driven logic (`signal_follower` close window) |
+| 1 s | `strategy.tick()` | Optional time-driven hooks (default no-op) |
 | 300 s | `report_once(broker, perf)` | Account NLV, positions, bot PnL |
 | Session end | `datetime >= TRADER_SESSION_END_TIME` | Exit loop → EOD flatten |
 
@@ -165,7 +165,9 @@ live-trader/                # uv workspace root (the app)
 │   ├── streaming.py        # QS SSE → queue
 │   ├── reporting.py        # report_once snapshots
 │   ├── brokers/            # create_broker discovery only (no concrete brokers)
-│   └── strategy/           # momentum, signal_follower
+│   └── strategy/           # momentum
+├── src/symbols/            # qs-trader-symbols: QS catalog, alias normalization, broker maps
+│   └── tests/              #   catalog tests
 ├── src/brokers/            # broker packages (uv workspace members)
 │   ├── core/               # qs-trader-broker-core: BrokerBase, OrderResult, SimulatedBroker
 │   │   └── tests/          #   package's own tests (SimulatedBroker)
@@ -181,9 +183,10 @@ live-trader/                # uv workspace root (the app)
 | Entry | `main.py` | `main()` |
 | Orchestration | `app.py` | `main`, `_run_trading_day`, `_close_all_positions`, `_sleep_until` |
 | Config | `config.py` | `Settings`, `load_settings` |
+| Symbols | `src/symbols/` (`qs_trader_symbols`) | `canonicalize`, `parse_allowed_symbols`, broker map helpers |
 | Ingestion | `streaming.py` | `stream_signals_thread` |
 | Execution | `trader/brokers/` (discovery) + `src/brokers/*` (packages) | `create_broker`, `BrokerBase` implementations |
-| Logic | `strategy/*` | `MomentumStrategy`, `SignalFollowerStrategy` |
+| Logic | `strategy/*` | `MomentumStrategy` |
 | Metrics | `models.py`, `reporting.py` | `PerformanceTracker`, `report_once` |
 
 ### Brokers (separate workspace packages)
@@ -206,8 +209,7 @@ Broker-specific quirks worth knowing here:
 | Class | File | Role |
 |-------|------|------|
 | `StrategyBase` | `base.py` | `handle_signal`, optional `tick`, `sync_positions`, `reset_for_new_day` |
-| `MomentumStrategy` | `momentum.py` | Interval-based sized slices; ETF mapping |
-| `SignalFollowerStrategy` | `signal_follower.py` | 1 share/minute; ET session windows |
+| `MomentumStrategy` | `momentum.py` | Interval-based sized slices |
 
 Register new strategies in `app._STRATEGIES`.
 
@@ -238,14 +240,14 @@ QuantumSignals emits objects consumed by `handle_signal(signal)`.
 
 **Symbol mapping** (QS signal → tradable instrument):
 
-| QS `signal.symbol` | Alpaca (ETF) | Strategies |
-|--------------------|--------------|------------|
-| ES, S&P500 | SPY | momentum, signal_follower |
-| NQ, Nasdaq100 | QQQ | momentum, signal_follower |
-| SPY | SPY | momentum only |
-| QQQ | QQQ | momentum only |
+| QS `signal.symbol` | Alpaca (ETF) |
+|--------------------|--------------|
+| ES, S&P500 | SPY |
+| NQ, Nasdaq100 | QQQ |
+| SPY | SPY |
+| QQQ | QQQ |
 
-Defined in `_SIGNAL_TO_TRADE` in each strategy module (`momentum.py` includes `SPY`/`QQQ`; `signal_follower.py` does not). A broker maps QS symbols to whatever it trades via its own `DEFAULT_SYMBOL_MAP` (see [brokers.md § Symbol maps](brokers.md#symbol-maps)).
+Defined in `qs_trader_symbols`. Each broker builds its tradable map from that catalog (see [brokers.md § Symbol maps](brokers.md#symbol-maps)).
 
 Set `TRADER_ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100`), not the ETF ticker.
 
@@ -366,64 +368,9 @@ flowchart LR
 
 Realized PnL on **closes** (position crosses zero or flips sign) is recorded in `PerformanceTracker` inside `_settle()` after each execution tick. Open exposure is not marked-to-market in the bot tracker until flat.
 
-#### `sync_positions()` vs `signal_follower`
-
-Unlike momentum (which mirrors broker holdings into strategy state), `signal_follower.sync_positions()` **closes all existing broker positions** at startup via `_close_stale_positions()` so each day starts flat.
-
 ---
 
-### 4.3 `signal_follower` — discrete share logic
-
-`TRADER_STRATEGY=signal_follower`. Trades **exactly 1 share** per actionable signal minute on the mapped ETF.
-
-#### Position sizing
-
-**Fixed:** `_open_incremental()` always `place_order(..., qty=1)`.
-
-`TRADER_DAILY_START_CAPITAL` is used only for **return % in log summaries**, not for order size.
-
-#### Eastern Time windows
-
-Hardcoded in [`signal_follower.py`](src/trader/strategy/signal_follower.py):
-
-| Phase | Time (ET) | Behavior |
-|-------|-----------|----------|
-| Pre-market | Before 9:45 (first signal of day) | `_close_stale_positions()` — flatten anything at broker |
-| Trading | 9:45 – 15:30 | Execute active decision |
-| Outside | Before 9:45 or after 15:30 | Skip (except close window) |
-| Close | 15:55 – 16:00 | `_flatten()` all symbols; also driven by `tick()` |
-
-#### Decision grid vs execution
-
-On minutes where `et_dt.minute % TRADER_EXECUTION_INTERVAL_MINUTES == 0`:
-
-| Signal | `_active_decision` |
-|--------|-------------------|
-| UP | LONG for next N minutes |
-| DOWN | SHORT for next N minutes |
-| STABLE | Cleared — pause trading |
-
-**Every signal minute** inside the trading window with an active decision calls `_open_incremental()` (1 share BUY or SELL).
-
-Contrast with **momentum:** momentum trades only at interval boundaries with **sized** slices; signal_follower sets direction on the grid but can trade **every minute**.
-
-#### Flatten & PnL
-
-`_flatten(sym)` when net ≠ 0:
-
-```
-dollar_pnl = net × fill_price - total_cost
-```
-
-Updates `PerformanceTracker.record_close()` and internal `_daily_pnl`. Cost basis tracked in `_total_cost` as signed shares × fill price accumulate.
-
-#### Daily reset
-
-`_reset_day()` on new ET date (triggered by first signal of the day). `reset_for_new_day()` from app clears state after EOD without requiring a signal.
-
----
-
-### 4.4 App-level risk actions
+### 4.3 App-level risk actions
 
 **EOD / shutdown flatten** — `_close_all_positions()` in `app.py`:
 
@@ -431,28 +378,7 @@ Updates `PerformanceTracker.record_close()` and internal `_daily_pnl`. Cost basi
 - Market order to flat; PnL uses `contract_multipliers` from settings
 - Records each close in `PerformanceTracker`
 
-**Two PnL views:**
-
-| Tracker | Used by | When updated |
-|---------|---------|--------------|
-| `PerformanceTracker` | `app` day/run summaries, `report_once` | `record_close()` on strategy closes + EOD flatten |
-| `_daily_pnl` | `signal_follower` inline logs | On `_flatten()` only |
-
-Momentum relies primarily on `PerformanceTracker`; signal_follower mirrors into both.
-
----
-
-### 4.5 Strategy comparison
-
-| Aspect | `momentum` | `signal_follower` |
-|--------|------------|-------------------|
-| Order size | Notional / interval / price | 1 share |
-| Trade frequency | Once per interval per symbol | Every signal minute with active decision |
-| Interval gate | Signal UTC timestamp | ET clock on decision grid |
-| Session logic | App supervisor (`SESSION_*`) | Hardcoded ET windows + app EOD |
-| Broker reconciliation | Re-reads broker every execution | Direct 1-share orders |
-| Short fractional | Reserve mechanism on Alpaca | Integer shares only |
-| ETF mapping | ES/NQ/S&P500/Nasdaq100/SPY/QQQ | ES/NQ/S&P500/Nasdaq100 only |
+Realized PnL is tracked in `PerformanceTracker` (`record_close()` on strategy closes and EOD flatten).
 
 ---
 
@@ -464,9 +390,9 @@ Full operator reference (env vars, strategies, symbols, paper vs live): [README.
 
 | Variable | Effect |
 |----------|--------|
-| `TRADER_STRATEGY` | `momentum` vs `signal_follower` |
-| `TRADER_DAILY_START_CAPITAL` | Momentum per-symbol daily notional; summary return % for both strategies |
-| `TRADER_EXECUTION_INTERVAL_MINUTES` | Momentum execution gate; signal_follower decision grid |
+| `TRADER_STRATEGY` | Strategy name (`momentum`) |
+| `TRADER_DAILY_START_CAPITAL` | Per-symbol daily notional budget for order sizing |
+| `TRADER_EXECUTION_INTERVAL_MINUTES` | Execution gate (one trade per symbol per interval) |
 | `TRADER_ALLOWED_SYMBOLS` | Filters QS symbols (comma-separated QS names, e.g. `S&P500,Nasdaq100`) |
 | `TRADER_BROKER` | Selects the broker (`simulated` = no real orders, the default); drives fractional vs whole-share sizing |
 | `ALPACA_PAPER` | Paper vs live account when `TRADER_BROKER=alpaca` |
@@ -536,7 +462,7 @@ uv run pytest -v
 | `tests/test_models.py` | `PerformanceTracker` |
 | `src/brokers/core/tests/test_simulated_broker.py` | `SimulatedBroker` (co-located with the core broker package) |
 | `tests/test_strategy.py` | `MomentumStrategy` + `FakeSignal` |
-| `tests/test_signal_follower.py` | ET windows, flatten, filters |
+| `src/symbols/tests/test_catalog.py` | QS symbol catalog |
 
 No live broker or QS API in CI-style unit tests.
 
@@ -591,4 +517,4 @@ uv run python scripts/smoke_multiday_supervisor.py --days 3
 | When is EOD flatten? | `app._run_trading_day`, `_close_all_positions` |
 | How are signals ingested? | `streaming.stream_signals_thread` |
 | Broker selection? | `brokers.create_broker` |
-| QS symbol formats? | [QS documentation.md](QS%20documentation.md) |
+| QS symbol formats? | [quantumsignals-client.md](quantumsignals-client.md) |

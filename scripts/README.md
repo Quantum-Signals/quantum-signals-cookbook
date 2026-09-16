@@ -5,7 +5,7 @@ automated test suite (`tests/`). They require a real QS API key.
 
 | Script | What it does | Requires |
 |---|---|---|
-| `smoke_qs_connection.py` | Validates your API key, prints the model catalog, and streams live signals | `QUANTUMSIGNALS_API_KEY` in `.env` |
+| `smoke_qs_connection.py` | Validates your API key, prints the signal catalog, and streams live signals | `QUANTUMSIGNALS_API_KEY` in `.env` |
 | `smoke_multiday_supervisor.py` | Drives the multi-day supervisor offline with a fake clock and stubbed QS stream (no API key needed) | Nothing — fully offline |
 
 ## Running

@@ -7,8 +7,10 @@ from typing import Optional
 
 from loguru import logger
 
-from qs_trader_broker_core.base import BrokerBase, OrderResult
-from qs_trader_broker_core.settings import SimulatedSettings
+from qs_trader_symbols import simulated_symbol_map
+
+from .base import BrokerBase, OrderResult
+from .settings import SimulatedSettings
 
 
 @dataclass
@@ -35,24 +37,15 @@ class SimulatedBroker(BrokerBase):
     # sizing path as the live equity/ETF broker it stands in for.
     supports_fractional: bool = True
 
-    DEFAULT_SYMBOL_MAP: dict[str, dict] = {
-        "ES":   {"symbol": "ES",   "secType": "FUT", "exchange": "CME",   "currency": "USD"},
-        "NQ":   {"symbol": "NQ",   "secType": "FUT", "exchange": "CME",   "currency": "USD"},
-        "YM":   {"symbol": "YM",   "secType": "FUT", "exchange": "CBOT",  "currency": "USD"},
-        "RTY":  {"symbol": "RTY",  "secType": "FUT", "exchange": "CME",   "currency": "USD"},
-        "CL":   {"symbol": "CL",   "secType": "FUT", "exchange": "NYMEX", "currency": "USD"},
-        "GC":   {"symbol": "GC",   "secType": "FUT", "exchange": "COMEX", "currency": "USD"},
-        "MES":  {"symbol": "MES",  "secType": "FUT", "exchange": "CME",   "currency": "USD"},
-        "MNQ":  {"symbol": "MNQ",  "secType": "FUT", "exchange": "CME",   "currency": "USD"},
-        "AAPL": {"symbol": "AAPL", "secType": "STK", "exchange": "SMART", "currency": "USD"},
-        "SPY":  {"symbol": "SPY",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
-        "QQQ":  {"symbol": "QQQ",  "secType": "STK", "exchange": "SMART", "currency": "USD"},
-    }
+    DEFAULT_SYMBOL_MAP: dict[str, dict] = simulated_symbol_map()
 
     DEFAULT_PRICES: dict[str, float] = {
         "ES": 5450.00, "NQ": 19200.00, "YM": 42500.00, "RTY": 2050.00,
         "MES": 5450.00, "MNQ": 19200.00,
-        "CL": 68.50, "GC": 2350.00, "AAPL": 218.50, "SPY": 545.00, "QQQ": 470.00,
+        "CL": 68.50, "GC": 2350.00, "SI": 29.50, "NG": 3.20,
+        "AAPL": 218.50, "SPY": 545.00, "QQQ": 470.00,
+        "DIA": 425.00, "IWM": 205.00,
+        "USO": 72.00, "GLD": 235.00, "SLV": 28.50, "UNG": 12.00,
     }
 
     def __init__(
@@ -80,6 +73,9 @@ class SimulatedBroker(BrokerBase):
 
     def disconnect(self) -> None:
         logger.info("[SIM] Simulated broker disconnected")
+
+    def startup_entitlement_warnings(self, canonical_symbols: list[str]) -> list[str]:
+        return []  # dry-run accepts every mapped symbol
 
     def resolve_contract(self, qs_symbol: str) -> Optional[SimContract]:
         spec = self._symbol_map.get(qs_symbol)

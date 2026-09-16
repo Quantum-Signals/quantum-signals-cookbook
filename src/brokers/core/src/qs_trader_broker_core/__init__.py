@@ -8,13 +8,13 @@ external broker dependency.
 
 from __future__ import annotations
 
-from qs_trader_broker_core.base import (
+from .base import (
     BrokerBase,
     OrderResult,
     normalize_position_side,
 )
-from qs_trader_broker_core.settings import SimulatedSettings
-from qs_trader_broker_core.simulated import SimContract, SimulatedBroker
+from .settings import SimulatedSettings
+from .simulated import SimContract, SimulatedBroker
 
 __all__ = [
     "BrokerBase",

@@ -110,16 +110,16 @@ Alpaca credentials are required only when `TRADER_BROKER=alpaca`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRADER_STRATEGY` | `momentum` | Trading strategy: `momentum` or `signal_follower` |
+| `TRADER_STRATEGY` | `momentum` | Trading strategy (`momentum` is the only option today) |
 | `TRADER_ALLOWED_SYMBOLS` | *(all)* | Comma-separated QS symbol filter, e.g. `ES,NQ` or `S&P500,Nasdaq100`. Empty = allow all mapped symbols |
-| `TRADER_EXECUTION_INTERVAL_MINUTES` | `5` | **momentum:** minutes between executions per symbol (gated on signal timestamp). **signal_follower:** N-minute decision grid |
+| `TRADER_EXECUTION_INTERVAL_MINUTES` | `5` | Minutes between executions per symbol (gated on signal timestamp) |
 
 ### Risk & Behaviour
 
 | Variable | Default | Description |
 |---|---|---|
 | `TRADER_CLOSE_ON_EXIT` | `true` | Flatten all open positions when the bot stops |
-| `TRADER_DAILY_START_CAPITAL` | `100000` | **momentum:** splits this notional across active symbols for order sizing. **signal_follower:** used only for return % in log summaries |
+| `TRADER_DAILY_START_CAPITAL` | `100000` | Splits this notional across active symbols for order sizing |
 | `TRADER_SIGNAL_QUEUE_MAXSIZE` | `0` | Max buffered signals (`0` = unlimited) |
 
 ### Session window & multi-day mode
@@ -152,14 +152,12 @@ actionable signals, so the day passes with an empty summary.
 
 ---
 
-## Strategies
+## Strategy (`momentum`)
 
-Both strategies consume minute-level signals from QuantumSignals and place orders
+The bot consumes minute-level signals from QuantumSignals and places orders
 through the configured broker. On **Alpaca**, futures signal symbols are mapped to
 correlated ETFs (see [Supported Symbols](#supported-symbols)). Each broker maps QS
-symbols to whatever it trades via its own symbol map.
-
-### `momentum` (default)
+symbols via the shared catalog in `qs_trader_symbols`.
 
 Incrementally builds a sized position on a fixed time grid (`TRADER_EXECUTION_INTERVAL_MINUTES`, default 5 min).
 
@@ -167,39 +165,21 @@ Incrementally builds a sized position on a fixed time grid (`TRADER_EXECUTION_IN
 - **Order size:** each UP/DOWN slice is sized so daily notional ≈ `TRADER_DAILY_START_CAPITAL / n_active_symbols` (e.g. $100k across ES + NQ → ~$50k per symbol per day).
 - **Broker reconciliation:** every tick re-reads the broker position and plans close-then-open legs, so failed orders, partial fills, or manual trades self-heal on the next interval.
 - **Fractional shares:** enabled on Alpaca (fractional longs; whole-share shorts with a reserve for sub-share intent). Whole-share brokers round each slice to whole shares.
-- **Signal symbols:** `ES`, `NQ`, `S&P500`, `Nasdaq100`, `SPY`, `QQQ` (QS client ≥ 0.6.0 may emit full names or ETF tickers directly).
-
-### `signal_follower`
-
-Discrete intraday strategy that trades **exactly 1 share** per actionable signal minute on the mapped ETF.
-
-- **Decision grid:** on every N-minute boundary (`TRADER_EXECUTION_INTERVAL_MINUTES`), the latest signal sets an *active decision* — UP → go long, DOWN → go short, STABLE → pause.
-- **Execution:** every signal minute inside the trading window with an active decision places a 1-share BUY or SELL.
-- **ET session windows (hardcoded):**
-  - **Pre-market** (before 9:45 AM): flatten any stale broker positions
-  - **Trading** (9:45 AM – 3:30 PM): execute active decisions
-  - **Close** (3:55 – 4:00 PM): flatten all positions (also driven by `tick()` even without new signals)
-- **Signal symbols:** `ES`, `NQ`, `S&P500`, `Nasdaq100` → traded as `SPY` / `QQQ` on Alpaca.
-- **`TRADER_DAILY_START_CAPITAL`:** does not affect order size — only the return % shown in day summaries.
-
-| Aspect | `momentum` | `signal_follower` |
-|---|---|---|
-| Order size | Notional / interval / price | 1 share |
-| Trade frequency | Once per interval per symbol | Every signal minute with active decision |
-| Session logic | App supervisor (`SESSION_*`) | Hardcoded ET windows + app EOD |
-| Best for | Sized, interval-based exposure | Simple 1-share-per-minute following |
 
 ---
 
 ## Supported Symbols
 
-Set `TRADER_ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100` or
-`ES,NQ`), not the ETF ticker.
+Set `TRADER_ALLOWED_SYMBOLS` using **any equivalent name** for an instrument —
+futures ticker (`GC`), full QS name (`Gold`), or ETF (`GLD`). All forms map to
+the same product and route to the broker (see startup **Symbol routing** log).
 
-Alpaca supports **equities and ETFs only** — futures signals are mapped to
-correlated ETFs, and any non-equity entry in the symbol map is rejected at order
-time. Other brokers define their own mappings; see
-[docs/brokers.md](docs/brokers.md).
+Catalog instruments include ES/NQ (→ SPY/QQQ on Alpaca), YM (→ DIA), RTY (→ IWM),
+CL (→ USO), GC (→ GLD), SI (→ SLV), NG (→ UNG), and AAPL. See
+`qs_trader_symbols.INSTRUMENTS` for the full alias list.
+
+Alpaca supports **equities and ETFs only** — futures names are mapped to correlated
+ETFs. See [docs/brokers.md](docs/brokers.md).
 
 ---
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from loguru import logger
 
-from qs_trader_broker_core import BrokerBase
+from qs_trader_broker_core.base import BrokerBase
 from trader.models import PerformanceTracker, Signal
 
 

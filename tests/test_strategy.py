@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 
+from qs_trader_broker_core import SimContract, SimulatedBroker, SimulatedSettings
+from qs_trader_broker_core.base import normalize_position_side
+from qs_trader_symbols import canonicalize
 from trader.config import Settings
-from qs_trader_broker_core import SimulatedBroker, SimulatedSettings
 from trader.models import PerformanceTracker, Signal
 from trader.strategy.momentum import MomentumStrategy
 
@@ -35,7 +37,8 @@ def _fire(strategy: MomentumStrategy, symbol: str, signal_value: int) -> None:
     enough in the past that any subsequent handle_signal call will pass the
     cooldown check regardless of its signal_time_utc.
     """
-    strategy._execute(symbol, signal_value, 0.0)
+    canon = canonicalize(symbol) or symbol
+    strategy._execute(canon, symbol, signal_value, 0.0)
 
 
 class TestMomentumStrategy:
@@ -189,6 +192,34 @@ class TestMomentumStrategy:
         symbols = {p["symbol"] for p in positions}
         assert symbols == {"SPY", "QQQ"}
 
+    def test_allowed_etf_names_accept_futures_signals(self):
+        """TRADER_ALLOWED_SYMBOLS=SPY,QQQ must still accept ES/NQ stream symbols."""
+        strategy, broker, perf = self._make_strategy(allowed_symbols=["SPY", "QQQ"])
+        _fire(strategy, "ES", Signal.UP)
+        _fire(strategy, "NQ", Signal.UP)
+        symbols = {p["symbol"] for p in broker.get_open_positions()}
+        assert symbols == {"SPY", "QQQ"}
+
+    def test_allowed_gld_accepts_gc_and_gold_names(self):
+        strategy, broker, perf = self._make_strategy(allowed_symbols=["GLD"])
+        _fire(strategy, "GC", Signal.UP)
+        _fire(strategy, "Gold", Signal.UP)
+        positions = broker.get_open_positions()
+        assert len(positions) == 1
+        assert positions[0]["symbol"] == "GLD"
+        assert positions[0]["pos"] > 0
+        assert len(broker._orders) == 2
+
+    def test_allowed_dia_accepts_ym_and_dow_names(self):
+        strategy, broker, perf = self._make_strategy(allowed_symbols=["DIA"])
+        _fire(strategy, "YM", Signal.UP)
+        _fire(strategy, "Dow30", Signal.UP)
+        positions = broker.get_open_positions()
+        assert len(positions) == 1
+        assert positions[0]["symbol"] == "DIA"
+        assert positions[0]["pos"] > 0
+        assert len(broker._orders) == 2
+
     # ------------------------------------------------------------------
     # Regression test: strategy must continue shorting after all longs
     # are exhausted, not stop at flat (the sell_to_short bug).
@@ -235,9 +266,9 @@ class TestMomentumStrategy:
         """Regression: fractional dust at broker must not block sell_to_open."""
         strategy, broker, perf = self._make_strategy(broker="alpaca")
         broker._sim_positions["SPY"] = {"pos": 0.0001, "avg_cost": 745.0}
-        strategy._net_qty["S&P500"] = 0.0001
-        strategy._total_cost["S&P500"] = 0.0001 * 745.0
-        strategy._position_reserve["S&P500"] = -0.5
+        strategy._net_qty["ES"] = 0.0001
+        strategy._total_cost["ES"] = 0.0001 * 745.0
+        strategy._position_reserve["ES"] = -0.5
 
         _fire(strategy, "S&P500", Signal.DOWN)
 
@@ -272,9 +303,9 @@ class TestMomentumStrategy:
         """Regression: broker dust after an unwind must not block the next short."""
         strategy, broker, perf = self._make_strategy(broker="alpaca")
         broker._sim_positions["SPY"] = {"pos": 0.0001, "avg_cost": 745.0}
-        strategy._net_qty["S&P500"] = 0.0001
-        strategy._total_cost["S&P500"] = 0.0001 * 745.0
-        strategy._position_reserve["S&P500"] = -0.5
+        strategy._net_qty["ES"] = 0.0001
+        strategy._total_cost["ES"] = 0.0001 * 745.0
+        strategy._position_reserve["ES"] = -0.5
 
         _fire(strategy, "S&P500", Signal.DOWN)
 
@@ -404,8 +435,6 @@ class TestMomentumStrategy:
     def test_normalize_position_side_alpaca_enum(self):
         """Regression: PositionSide str() is 'PositionSide.SHORT', not 'short'."""
         from alpaca.trading.enums import PositionSide
-
-        from qs_trader_broker_core import normalize_position_side
 
         assert normalize_position_side(PositionSide.SHORT) == "short"
         assert normalize_position_side(PositionSide.LONG) == "long"
@@ -554,3 +583,35 @@ class TestMomentumStrategy:
         assert buy_orders[0]["qty"] <= 1e-7
         assert buy_orders[1]["position_intent"] == "open"
         assert buy_orders[1]["qty"] > 4.0
+
+
+class TestPositionSymbol:
+    def test_string_and_sim_contract(self):
+        from trader.strategy.momentum import _position_symbol
+
+        assert _position_symbol("SPY", "SPY") == "SPY"
+        sim = SimContract(symbol="SPY", sec_type="STK", exchange="SMART", currency="USD")
+        assert _position_symbol(sim, "QQQ") == "SPY"
+
+
+class TestInstrumentLabel:
+    def test_string_contract_is_ticker(self):
+        from trader.strategy.momentum import _instrument_label
+
+        assert _instrument_label("SPY", "SPY") == "SPY"
+
+
+class TestComputeOrderQty:
+    def test_mes_1m_at_30min_is_about_two_lots(self):
+        from trader.strategy.momentum import _compute_order_qty
+
+        qty = _compute_order_qty(
+            30, 7700.0, 1_000_000.0, use_fractional=False, multiplier=5.0
+        )
+        assert qty == 2.0
+
+    def test_spy_unchanged_without_multiplier(self):
+        from trader.strategy.momentum import _compute_order_qty
+
+        qty = _compute_order_qty(5, 545.0, 50_000.0, use_fractional=False)
+        assert qty == 1.0

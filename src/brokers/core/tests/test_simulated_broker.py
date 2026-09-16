@@ -11,9 +11,9 @@ class TestSimulatedBroker:
         broker = SimulatedBroker()
         contract = broker.resolve_contract("ES")
         assert isinstance(contract, SimContract)
-        assert contract.symbol == "ES"
-        assert contract.sec_type == "FUT"
-        assert contract.exchange == "CME"
+        assert contract.symbol == "SPY"
+        assert contract.sec_type == "STK"
+        assert contract.exchange == "SMART"
 
     def test_resolve_unknown_symbol_auto_creates(self):
         broker = SimulatedBroker()
@@ -48,7 +48,7 @@ class TestSimulatedBroker:
 
         positions = broker.get_open_positions()
         assert len(positions) == 1
-        assert positions[0]["symbol"] == "ES"
+        assert positions[0]["symbol"] == "SPY"
         assert positions[0]["pos"] == 1
 
     def test_place_sell_closes_position(self):

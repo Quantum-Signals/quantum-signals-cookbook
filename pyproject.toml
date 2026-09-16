@@ -12,6 +12,7 @@ dependencies = [
     # Broker packages (workspace members). Each owns its own broker SDK
     # (e.g. alpaca-py) and registers a "qs_trader_brokers" entry point that
     # trader.brokers.create_broker discovers at runtime.
+    "qs-trader-symbols",
     "qs-trader-broker-core",
     "qs-trader-broker-alpaca",
 ]
@@ -27,9 +28,10 @@ build-backend = "hatchling.build"
 packages = ["src/trader"]
 
 [tool.uv.workspace]
-members = ["src/brokers/*"]
+members = ["src/brokers/*", "src/symbols"]
 
 [tool.uv.sources]
+qs-trader-symbols = { workspace = true }
 qs-trader-broker-core = { workspace = true }
 qs-trader-broker-alpaca = { workspace = true }
 
