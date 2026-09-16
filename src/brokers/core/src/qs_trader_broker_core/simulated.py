@@ -28,13 +28,13 @@ class SimulatedBroker(BrokerBase):
 
     Owns its own symbol map (contract shapes) and seed prices; both fall back
     to the class defaults when the ``symbol_map`` / ``sim_prices`` constructor
-    overrides are omitted. Any symbol not in the map is auto-created so DRY_RUN
-    can exercise arbitrary symbols.
+    overrides are omitted. Any symbol not in the map is auto-created so the
+    simulated broker can exercise arbitrary symbols.
     """
 
     # Simulates fractional fills (and mimics Alpaca's fractional-short
-    # rejection, code 42210000), so DRY_RUN exercises the same fractional
-    # sizing path as the live equity/ETF broker it stands in for.
+    # rejection, code 42210000), so the simulated broker exercises the same
+    # fractional sizing path as the live equity/ETF broker it stands in for.
     supports_fractional: bool = True
 
     DEFAULT_SYMBOL_MAP: dict[str, dict] = simulated_symbol_map()

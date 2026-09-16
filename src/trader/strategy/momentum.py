@@ -284,7 +284,7 @@ class MomentumStrategy(StrategyBase):
         if contract is None:
             logger.warning(
                 f"  -> No tradable contract for {qs_symbol} — skipping "
-                f"(check symbol map / contract month / IB permissions)"
+                f"(check symbol map / contract month / broker permissions)"
             )
             return
 

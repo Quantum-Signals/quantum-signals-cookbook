@@ -103,7 +103,7 @@ Alpaca credentials are required only when `TRADER_BROKER=alpaca`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRADER_BROKER` | `simulated` | Broker to use. `simulated` = no real orders, no Alpaca/IB connection needed. Set to `alpaca` (or any other installed broker) to trade for real |
+| `TRADER_BROKER` | `simulated` | Broker to use. `simulated` = no real orders (no Alpaca connection). Set to `alpaca` (or any other installed broker) to trade for real |
 | `ALPACA_PAPER` | `true` | Only applies when `TRADER_BROKER=alpaca`. `true` = Alpaca paper account, `false` = Alpaca live account (real money) |
 
 ### Strategy
@@ -111,7 +111,7 @@ Alpaca credentials are required only when `TRADER_BROKER=alpaca`:
 | Variable | Default | Description |
 |---|---|---|
 | `TRADER_STRATEGY` | `momentum` | Trading strategy (`momentum` is the only option today) |
-| `TRADER_ALLOWED_SYMBOLS` | *(all)* | Comma-separated QS symbol filter, e.g. `ES,NQ` or `S&P500,Nasdaq100`. Empty = allow all mapped symbols |
+| `TRADER_ALLOWED_SYMBOLS` | *(all)* | Comma-separated filter; any alias works (`ES`, `SPY`, `S&P500`). Empty = allow all catalog symbols |
 | `TRADER_EXECUTION_INTERVAL_MINUTES` | `5` | Minutes between executions per symbol (gated on signal timestamp) |
 
 ### Risk & Behaviour

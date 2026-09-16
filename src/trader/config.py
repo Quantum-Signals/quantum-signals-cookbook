@@ -55,8 +55,8 @@ class Settings(BaseSettings):
     broker: str = "simulated"
     max_stream_retries: int = 5
     strategy: str = "momentum"
-    # Comma-separated in ``TRADER_ALLOWED_SYMBOLS``. Accepts futures tickers
-    # Futures tickers (``GC``), full QS names (``Gold``), or ETF tickers (``GLD``)
+    # Comma-separated in ``TRADER_ALLOWED_SYMBOLS``. Futures tickers (``GC``),
+    # full QS names (``Gold``), or ETF tickers (``GLD``) all map to the same
     # — all equivalent forms map to the same instrument and route to the broker
     # (e.g. GC→GLD on Alpaca). Empty = allow all catalog symbols.
     allowed_symbols: Annotated[list[str], NoDecode] = []

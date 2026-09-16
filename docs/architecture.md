@@ -36,7 +36,7 @@ A long-running Python process that:
 | File | Audience |
 |------|----------|
 | [README.md](README.md) | Deploy and configure via Docker / `.env` |
-| **documentation.md** (this file) | Code structure and trading logic |
+| [architecture.md](architecture.md) (this file) | Code structure and trading logic |
 | [brokers.md](brokers.md) | Broker plugin architecture; add your own broker |
 | [quantumsignals-client.md](quantumsignals-client.md) | `quantumsignals-client` API usage |
 
@@ -153,7 +153,7 @@ When `TRADER_RUN_DAYS=0` (default), the process runs until Ctrl-C:
 ```
 live-trader/                # uv workspace root (the app)
 ├── main.py                 # → trader.app:main
-├── documentation.md        # This file
+├── docs/architecture.md    # This file
 ├── README.md               # Operator quick start
 ├── pyproject.toml          # app deps + [tool.uv.workspace]
 ├── .env.example
@@ -161,6 +161,7 @@ live-trader/                # uv workspace root (the app)
 ├── src/trader/             # the app package
 │   ├── app.py              # Orchestration, session supervisor, EOD
 │   ├── config.py           # app Settings (orchestration), multipliers
+│   ├── access_control.py   # startup QS + broker entitlement checks
 │   ├── models.py           # Signal enum, PerformanceTracker
 │   ├── streaming.py        # QS SSE → queue
 │   ├── reporting.py        # report_once snapshots
@@ -172,7 +173,7 @@ live-trader/                # uv workspace root (the app)
 │   ├── core/               # qs-trader-broker-core: BrokerBase, OrderResult, SimulatedBroker
 │   │   └── tests/          #   package's own tests (SimulatedBroker)
 │   └── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
-├── tests/                  # app-level tests (config, strategies, models)
+├── tests/                  # app-level tests (config, strategies, models, access control)
 └── scripts/                # QS smoke test, multiday sim
 ```
 
@@ -183,6 +184,7 @@ live-trader/                # uv workspace root (the app)
 | Entry | `main.py` | `main()` |
 | Orchestration | `app.py` | `main`, `_run_trading_day`, `_close_all_positions`, `_sleep_until` |
 | Config | `config.py` | `Settings`, `load_settings` |
+| Access | `access_control.py` | `run_startup_access_checks` |
 | Symbols | `src/symbols/` (`qs_trader_symbols`) | `canonicalize`, `parse_allowed_symbols`, broker map helpers |
 | Ingestion | `streaming.py` | `stream_signals_thread` |
 | Execution | `trader/brokers/` (discovery) + `src/brokers/*` (packages) | `create_broker`, `BrokerBase` implementations |
@@ -249,7 +251,7 @@ QuantumSignals emits objects consumed by `handle_signal(signal)`.
 
 Defined in `qs_trader_symbols`. Each broker builds its tradable map from that catalog (see [brokers.md § Symbol maps](brokers.md#symbol-maps)).
 
-Set `TRADER_ALLOWED_SYMBOLS` using the **QS signal name** (e.g. `S&P500,Nasdaq100`), not the ETF ticker.
+Set `TRADER_ALLOWED_SYMBOLS` using **any alias** for an instrument (`ES`, `SPY`, or `S&P500` all select the same product). Empty = allow the full catalog.
 
 ---
 
@@ -273,15 +275,15 @@ qty_per_slice           = target_daily_notional_per_symbol / (executions_per_day
 target_daily_notional_per_symbol = TRADER_DAILY_START_CAPITAL / n_active_symbols
 ```
 
-- `n_active_symbols` = count of keys in `_SIGNAL_TO_TRADE` that pass `TRADER_ALLOWED_SYMBOLS` (minimum 1). With no filter, all six mapped symbols count (`ES`, `NQ`, `S&P500`, `Nasdaq100`, `SPY`, `QQQ`).
+- `n_active_symbols` = count of canonical instruments from `trading_targets()` (minimum 1). Empty `TRADER_ALLOWED_SYMBOLS` → every instrument in the catalog.
 - Example: `$100,000` capital, `TRADER_ALLOWED_SYMBOLS=ES,NQ` → **$50,000 notional per symbol per day**
 
 **Broker rounding:**
 
-| Broker | `use_fractional` | Order qty |
+| Broker | `use_fractional` (`BrokerBase.supports_fractional`) | Order qty |
 |--------|------------------|-----------|
-| Alpaca | `true` | `round(raw, 4)` shares |
-| non-fractional / sim | `false` | `max(1, round(raw))` whole shares |
+| Alpaca, Simulated | `true` | `round(raw, 4)` shares |
+| non-fractional brokers | `false` | `max(1, round(raw))` whole shares |
 
 Doubling `TRADER_EXECUTION_INTERVAL_MINUTES` halves `executions_per_day` and **doubles** `qty_per_slice`, keeping approximate daily notional stable.
 
@@ -304,7 +306,7 @@ On a whole-share broker the same inputs yield `max(1, round(1.1776)) = 1` share 
 
 #### Per-interval behavior (`handle_signal`)
 
-1. Filter: null signal, `TRADER_ALLOWED_SYMBOLS`, must have mapping in `_SIGNAL_TO_TRADE`
+1. Filter: null signal, `TRADER_ALLOWED_SYMBOLS` / `is_symbol_allowed()`, unknown names only as passthrough
 2. **Interval gate:** at most one execution per symbol per `TRADER_EXECUTION_INTERVAL_MINUTES`, comparing the **signal's UTC timestamp** (floored to whole seconds) against `_last_exec_time` — not wall-clock arrival time. This keeps ES and NQ aligned when they share the same QS bar timestamp.
 3. **STABLE:** no order; timer still updated
 4. **UP / DOWN:** call `_execute()`
@@ -393,7 +395,7 @@ Full operator reference (env vars, strategies, symbols, paper vs live): [README.
 | `TRADER_STRATEGY` | Strategy name (`momentum`) |
 | `TRADER_DAILY_START_CAPITAL` | Per-symbol daily notional budget for order sizing |
 | `TRADER_EXECUTION_INTERVAL_MINUTES` | Execution gate (one trade per symbol per interval) |
-| `TRADER_ALLOWED_SYMBOLS` | Filters QS symbols (comma-separated QS names, e.g. `S&P500,Nasdaq100`) |
+| `TRADER_ALLOWED_SYMBOLS` | Filters QS symbols (any alias: `ES`, `SPY`, `S&P500`) |
 | `TRADER_BROKER` | Selects the broker (`simulated` = no real orders, the default); drives fractional vs whole-share sizing |
 | `ALPACA_PAPER` | Paper vs live account when `TRADER_BROKER=alpaca` |
 
@@ -460,6 +462,7 @@ uv run pytest -v
 | File | Covers |
 |------|--------|
 | `tests/test_models.py` | `PerformanceTracker` |
+| `tests/test_access_control.py` | Startup QS entitlement checks |
 | `src/brokers/core/tests/test_simulated_broker.py` | `SimulatedBroker` (co-located with the core broker package) |
 | `tests/test_strategy.py` | `MomentumStrategy` + `FakeSignal` |
 | `src/symbols/tests/test_catalog.py` | QS symbol catalog |
@@ -484,16 +487,14 @@ uv run python scripts/smoke_multiday_supervisor.py --days 3
 | Topic | Detail |
 |-------|--------|
 | QS disconnects | Exponential backoff; fatal after 5 retries |
-| QS symbol formats | Legacy `ES`/`NQ`, full names `S&P500`/`Nasdaq100`, or ETF tickers `SPY`/`QQQ` (momentum only) |
+| QS symbol formats | Futures roots (`ES`/`NQ`), full names (`S&P500`/`Nasdaq100`), ETF tickers (`SPY`/`QQQ`), and other catalog aliases |
 | Interval gate | Momentum uses signal timestamp, not arrival time — sub-second QS timestamps are floored |
 | Broker drift | Momentum re-reads broker every execution; strategy cache is advisory only |
 | Holidays | Not detected — bot wakes; often empty day |
 | Alpaca fractional shorts | Momentum reserve + close/open legs; do not remove without regression tests |
 | Alpaca hung HTTP | Default timeouts in `AlpacaBroker` |
 | Broker thread affinity | Never call broker from QS thread |
-| IB error 10197 | Competing TWS/Gateway — close other sessions |
 | Position drift | Pre-session `sync_positions()` — broker is truth |
-| Futures roll | Update `lastTradeDateOrContractMonth` in `config.py` |
 | `TRADER_SESSION_END_TIME` | Default **15:55** ET — flatten before 16:00 auction |
 | Signal queue full | Set `TRADER_SIGNAL_QUEUE_MAXSIZE` or speed up strategy |
 
@@ -502,7 +503,6 @@ uv run python scripts/smoke_multiday_supervisor.py --days 3
 - US market holiday calendar
 - Expose `max_stream_retries` via env
 - Health metric (last signal timestamp / stream alive)
-- CI workflow for `pytest` on pull requests
 - Structured metrics (Prometheus, CloudWatch)
 
 ---
@@ -517,4 +517,5 @@ uv run python scripts/smoke_multiday_supervisor.py --days 3
 | When is EOD flatten? | `app._run_trading_day`, `_close_all_positions` |
 | How are signals ingested? | `streaming.stream_signals_thread` |
 | Broker selection? | `brokers.create_broker` |
-| QS symbol formats? | [quantumsignals-client.md](quantumsignals-client.md) |
+| QS symbol catalog? | `qs_trader_symbols` |
+| QS client usage? | [quantumsignals-client.md](quantumsignals-client.md) |

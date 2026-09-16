@@ -5,7 +5,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
-# Copy the workspace (root + broker packages under src/brokers/*) and install.
+# Copy the workspace (root + src/symbols + src/brokers/*) and install.
 # The workspace members must be present before `uv sync` so it can resolve and
 # build them, so we copy source before syncing (single layer).
 COPY pyproject.toml uv.lock README.md ./

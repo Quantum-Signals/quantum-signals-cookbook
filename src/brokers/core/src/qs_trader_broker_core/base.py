@@ -89,8 +89,8 @@ class BrokerBase(ABC):
           - ``AlpacaBroker`` treats an unmapped symbol as a direct ticker, and
             returns ``None`` for mapped non-equity (``secType != "STK"``) specs,
             since Alpaca trades equities/ETFs only.
-          - ``SimulatedBroker`` auto-creates a placeholder contract so DRY_RUN
-            can exercise any symbol.
+          - ``SimulatedBroker`` auto-creates a placeholder contract so the
+            simulated broker can exercise any symbol.
           - A broker with a fixed instrument set may return ``None`` for any
             symbol not in its map.
 

@@ -1,7 +1,8 @@
 # Scripts
 
 Manual tools for smoke-testing and learning. These are **not** part of the
-automated test suite (`tests/`). They require a real QS API key.
+automated test suite (`tests/`). `smoke_qs_connection.py` needs a real QS API
+key; `smoke_multiday_supervisor.py` is fully offline.
 
 | Script | What it does | Requires |
 |---|---|---|
