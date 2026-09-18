@@ -172,7 +172,8 @@ live-trader/                # uv workspace root (the app)
 ├── src/brokers/            # broker packages (uv workspace members)
 │   ├── core/               # qs-trader-broker-core: BrokerBase, OrderResult, SimulatedBroker
 │   │   └── tests/          #   package's own tests (SimulatedBroker)
-│   └── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
+│   ├── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
+│   └── rithmic/            # qs-trader-broker-rithmic (deps: async-rithmic)
 ├── tests/                  # app-level tests (config, strategies, models, access control)
 └── scripts/                # QS smoke test, multiday sim
 ```
@@ -204,6 +205,7 @@ Broker-specific quirks worth knowing here:
 | Class | Notes |
 |-------|-------|
 | `AlpacaBroker` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
+| `RithmicBroker` | Contract = front-month futures (micro roots); whole-share; stay on Rithmic Test until conformance |
 | `SimulatedBroker` | Jittered seed prices (`SIM_PRICE_JITTER`, `0` = deterministic); no external broker |
 
 ### Strategies (`src/trader/strategy/`)
@@ -466,6 +468,7 @@ uv run pytest -v
 | `src/brokers/core/tests/test_simulated_broker.py` | `SimulatedBroker` (co-located with the core broker package) |
 | `tests/test_strategy.py` | `MomentumStrategy` + `FakeSignal` |
 | `src/symbols/tests/test_catalog.py` | QS symbol catalog |
+| `src/brokers/rithmic/tests/test_rithmic_broker.py` | Front-month + contract resolution |
 
 No live broker or QS API in CI-style unit tests.
 

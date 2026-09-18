@@ -15,6 +15,8 @@ from .catalog import (
     is_symbol_allowed,
     parse_allowed_symbols,
     position_symbol_to_canonical,
+    rithmic_root_specs,
+    rithmic_symbol_map,
     simulated_symbol_map,
     trading_targets,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "is_symbol_allowed",
     "parse_allowed_symbols",
     "position_symbol_to_canonical",
+    "rithmic_root_specs",
+    "rithmic_symbol_map",
     "simulated_symbol_map",
     "trading_targets",
 ]

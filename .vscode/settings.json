@@ -5,6 +5,7 @@
     "${workspaceFolder}/src",
     "${workspaceFolder}/src/symbols/src",
     "${workspaceFolder}/src/brokers/core/src",
-    "${workspaceFolder}/src/brokers/alpaca/src"
+    "${workspaceFolder}/src/brokers/alpaca/src",
+    "${workspaceFolder}/src/brokers/rithmic/src"
   ]
 }

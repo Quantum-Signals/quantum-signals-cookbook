@@ -593,12 +593,26 @@ class TestPositionSymbol:
         sim = SimContract(symbol="SPY", sec_type="STK", exchange="SMART", currency="USD")
         assert _position_symbol(sim, "QQQ") == "SPY"
 
+    def test_rithmic_uses_root(self):
+        from qs_trader_broker_rithmic import RithmicContract
+        from trader.strategy.momentum import _position_symbol
+
+        c = RithmicContract(trading_symbol="ESU6", exchange="CME", root="ES")
+        assert _position_symbol(c, "SPY") == "ES"
+
 
 class TestInstrumentLabel:
     def test_string_contract_is_ticker(self):
         from trader.strategy.momentum import _instrument_label
 
         assert _instrument_label("SPY", "SPY") == "SPY"
+
+    def test_rithmic_uses_trading_symbol(self):
+        from qs_trader_broker_rithmic import RithmicContract
+        from trader.strategy.momentum import _instrument_label
+
+        c = RithmicContract(trading_symbol="ESU6", exchange="CME", root="ES")
+        assert _instrument_label(c, "SPY") == "ESU6"
 
 
 class TestComputeOrderQty:

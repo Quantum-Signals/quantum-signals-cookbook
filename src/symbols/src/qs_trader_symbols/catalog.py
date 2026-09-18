@@ -1,9 +1,9 @@
-"""QuantumSignals symbol catalog - canonical names, aliases, and broker helpers.
+"""QuantumSignals symbol catalog — canonical names, aliases, and broker helpers.
 
 Every name the QS stream may emit for an instrument lives here once. Strategies
 normalize incoming ``signal.symbol`` values to a *canonical* key (futures root,
 e.g. ``ES``) for internal state. Each broker builds its own tradable map from
-this catalog (Alpaca tickers, simulated contracts).
+this catalog (Alpaca tickers, Rithmic roots, simulated contracts).
 """
 
 from __future__ import annotations
@@ -24,6 +24,12 @@ class QSInstrument:
     alpaca_ticker: str | None = None
     """Tradable Alpaca equity/ETF; ``None`` when this broker cannot trade it."""
 
+    rithmic_root: str | None = None
+    """CME/CBOT/COMEX/NYMEX product root; ``None`` when not on Rithmic."""
+
+    rithmic_exchange: str = "CME"
+    """Exchange passed to Rithmic for ``rithmic_root``."""
+
     position_symbols: frozenset[str] = frozenset()
     """Extra broker position keys (ETF tickers, micro roots) for sync lookups."""
 
@@ -32,6 +38,8 @@ def _inst(
     canonical: str,
     *aliases: str,
     alpaca_ticker: str | None = None,
+    rithmic_root: str | None = None,
+    rithmic_exchange: str = "CME",
     position_symbols: frozenset[str] | None = None,
 ) -> QSInstrument:
     all_names = frozenset({canonical, *aliases})
@@ -39,11 +47,14 @@ def _inst(
     extras: set[str] = set(pos)
     if alpaca_ticker:
         extras.add(alpaca_ticker)
-    extras |= all_names
+    if rithmic_root:
+        extras.add(rithmic_root)
     return QSInstrument(
         canonical=canonical,
         aliases=all_names,
         alpaca_ticker=alpaca_ticker,
+        rithmic_root=rithmic_root,
+        rithmic_exchange=rithmic_exchange,
         position_symbols=frozenset(extras),
     )
 
@@ -57,6 +68,7 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "SPY",
         "MES",
         alpaca_ticker="SPY",
+        rithmic_root="MES",
     ),
     _inst(
         "NQ",
@@ -64,6 +76,7 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "QQQ",
         "MNQ",
         alpaca_ticker="QQQ",
+        rithmic_root="MNQ",
     ),
     _inst(
         "YM",
@@ -72,6 +85,8 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "DIA",
         "MYM",
         alpaca_ticker="DIA",
+        rithmic_root="MYM",
+        rithmic_exchange="CBOT",
     ),
     _inst(
         "RTY",
@@ -80,24 +95,31 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "IWM",
         "M2K",
         alpaca_ticker="IWM",
+        rithmic_root="M2K",
     ),
     _inst(
         "CL",
         "Crude Oil",
         "USO",
         alpaca_ticker="USO",
+        rithmic_root="CL",
+        rithmic_exchange="NYMEX",
     ),
     _inst(
         "GC",
         "Gold",
         "GLD",
         alpaca_ticker="GLD",
+        rithmic_root="GC",
+        rithmic_exchange="COMEX",
     ),
     _inst(
         "SI",
         "Silver",
         "SLV",
         alpaca_ticker="SLV",
+        rithmic_root="SI",
+        rithmic_exchange="COMEX",
     ),
     _inst(
         "NG",
@@ -105,6 +127,8 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "Gas",
         "UNG",
         alpaca_ticker="UNG",
+        rithmic_root="NG",
+        rithmic_exchange="NYMEX",
     ),
     _inst(
         "AAPL",
@@ -237,6 +261,35 @@ def alpaca_symbol_map() -> dict[str, str]:
     return mapping
 
 
+def rithmic_symbol_map() -> dict[str, dict[str, str]]:
+    """Build Rithmic ``DEFAULT_SYMBOL_MAP`` (QS alias → root + exchange)."""
+    mapping: dict[str, dict[str, str]] = {}
+    for instrument in INSTRUMENTS:
+        if not instrument.rithmic_root:
+            continue
+        spec = {"root": instrument.rithmic_root, "exchange": instrument.rithmic_exchange}
+        for alias in instrument.aliases:
+            mapping[alias] = dict(spec)
+        for pos in instrument.position_symbols:
+            mapping[pos] = dict(spec)
+    return mapping
+
+
+def rithmic_root_specs() -> tuple[tuple[str, str], ...]:
+    """Unique ``(root, exchange)`` pairs for every Rithmic-tradable instrument."""
+    seen: set[tuple[str, str]] = set()
+    specs: list[tuple[str, str]] = []
+    for instrument in INSTRUMENTS:
+        if not instrument.rithmic_root:
+            continue
+        key = (instrument.rithmic_root, instrument.rithmic_exchange)
+        if key in seen:
+            continue
+        seen.add(key)
+        specs.append(key)
+    return tuple(specs)
+
+
 def simulated_symbol_map() -> dict[str, dict[str, str]]:
     """Build SimulatedBroker ``DEFAULT_SYMBOL_MAP`` (QS alias → contract spec)."""
     _EXCHANGE: dict[str, str] = {
@@ -275,6 +328,8 @@ def simulated_symbol_map() -> dict[str, dict[str, str]]:
     for instrument in INSTRUMENTS:
         if instrument.alpaca_ticker:
             trade, sec = instrument.alpaca_ticker, "STK"
+        elif instrument.rithmic_root:
+            trade, sec = instrument.rithmic_root, "FUT"
         else:
             trade, sec = instrument.canonical, "STK"
         spec = _spec(trade, sec)

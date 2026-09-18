@@ -1,6 +1,6 @@
 # QuantumSignals Live Trader
 
-An algorithmic trading bot that streams real-time signals from [QuantumSignals](https://quantumsignals.io) and executes trades automatically through a pluggable broker (**Alpaca** included).
+An algorithmic trading bot that streams real-time signals from [QuantumSignals](https://quantumsignals.io) and executes trades automatically through a pluggable broker (**Alpaca** and **Rithmic** included).
 
 **Developer documentation:** [docs/architecture.md](docs/architecture.md): module map, position-sizing logic, local development.
 
@@ -13,6 +13,7 @@ An algorithmic trading bot that streams real-time signals from [QuantumSignals](
 - [Docker](https://docs.docker.com/get-docker/) installed on your machine
 - A **QuantumSignals** API key — get one at [quantumsignals.io](https://quantumsignals.io)
 - For Alpaca: **Alpaca** [account](https://alpaca.markets) and API keys
+- For Rithmic: Protocol API Test credentials from Rithmic (stay on **Rithmic Test** until conformance)
 
 ---
 
@@ -103,8 +104,17 @@ Alpaca credentials are required only when `TRADER_BROKER=alpaca`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRADER_BROKER` | `simulated` | Broker to use. `simulated` = no real orders (no Alpaca connection). Set to `alpaca` (or any other installed broker) to trade for real |
+| `TRADER_BROKER` | `simulated` | Broker to use. `simulated` = no real orders. Set to `alpaca` or `rithmic` (or any other installed broker) to trade for real |
 | `ALPACA_PAPER` | `true` | Only applies when `TRADER_BROKER=alpaca`. `true` = Alpaca paper account, `false` = Alpaca live account (real money) |
+
+Rithmic credentials are required only when `TRADER_BROKER=rithmic`. Stay on **Rithmic Test** until conformance.
+
+| Variable | Description |
+|---|---|
+| `RITHMIC_USER` | Test (or later live) username |
+| `RITHMIC_PASSWORD` | Password |
+| `RITHMIC_SYSTEM_NAME` | `Rithmic Test` until conformance |
+| `RITHMIC_GATEWAY_URL` | Test: `wss://rituz00100.rithmic.com:443` |
 
 ### Strategy
 
@@ -179,7 +189,8 @@ CL (→ USO), GC (→ GLD), SI (→ SLV), NG (→ UNG), and AAPL. See
 `qs_trader_symbols.INSTRUMENTS` for the full alias list.
 
 Alpaca supports **equities and ETFs only** — futures names are mapped to correlated
-ETFs. See [docs/brokers.md](docs/brokers.md).
+ETFs. Rithmic maps to CME/NYMEX/COMEX micro or full roots. See
+[docs/brokers.md](docs/brokers.md).
 
 ---
 
@@ -210,6 +221,10 @@ TRADER_BROKER=simulated
 # 2. Paper trade with real broker fills
 TRADER_BROKER=alpaca
 ALPACA_PAPER=true
+
+# 2b. Or Rithmic Test (futures) — stay on Test until conformance
+# TRADER_BROKER=rithmic
+# RITHMIC_SYSTEM_NAME=Rithmic Test
 
 # 3. Live trading — only after paper results look correct
 TRADER_BROKER=alpaca

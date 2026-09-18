@@ -15,6 +15,7 @@ dependencies = [
     "qs-trader-symbols",
     "qs-trader-broker-core",
     "qs-trader-broker-alpaca",
+    "qs-trader-broker-rithmic",
 ]
 
 [project.scripts]
@@ -34,6 +35,7 @@ members = ["src/brokers/*", "src/symbols"]
 qs-trader-symbols = { workspace = true }
 qs-trader-broker-core = { workspace = true }
 qs-trader-broker-alpaca = { workspace = true }
+qs-trader-broker-rithmic = { workspace = true }
 
 [dependency-groups]
 dev = [

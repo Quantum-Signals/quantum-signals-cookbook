@@ -1,0 +1,26 @@
+[project]
+name = "qs-trader-broker-rithmic"
+version = "0.1.0"
+description = "Rithmic broker (Protocol API, CME futures) for the QuantumSignals live trader"
+requires-python = ">=3.12"
+dependencies = [
+    "qs-trader-broker-core",
+    "qs-trader-symbols",
+    "async-rithmic>=1.6.6",
+    "loguru>=0.7.3",
+    "pydantic-settings>=2.0",
+]
+
+[project.entry-points.qs_trader_brokers]
+rithmic = "qs_trader_broker_rithmic:RithmicBroker"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qs_trader_broker_rithmic"]
+
+[tool.uv.sources]
+qs-trader-broker-core = { workspace = true }
+qs-trader-symbols = { workspace = true }

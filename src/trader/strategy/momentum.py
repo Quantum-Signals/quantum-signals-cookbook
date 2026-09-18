@@ -284,7 +284,7 @@ class MomentumStrategy(StrategyBase):
         if contract is None:
             logger.warning(
                 f"  -> No tradable contract for {qs_symbol} — skipping "
-                f"(check symbol map / contract month / broker permissions)"
+                f"(check symbol map / contract month / IB permissions)"
             )
             return
 
@@ -530,8 +530,9 @@ def _floor_leg(qty: float, use_fractional: bool) -> float:
 def _position_symbol(contract: object, fallback: str) -> str:
     """Symbol used in broker position dicts for *contract*.
 
-    Alpaca contracts are ticker strings. Simulated contracts use ``.symbol``.
-    Other brokers may expose ``position_key`` or ``root``.
+    Alpaca contracts are ticker strings. Rithmic contracts expose
+    ``position_key`` (product root, e.g. ``ES``) so sync/EOD PnL match
+    ``contract_multipliers``. Simulated contracts use ``.symbol``.
     """
     if isinstance(contract, str):
         return contract
@@ -545,8 +546,8 @@ def _position_symbol(contract: object, fallback: str) -> str:
 def _instrument_label(contract: object, fallback: str) -> str:
     """Name to print in logs: the instrument actually sent to the broker.
 
-    Alpaca contracts are ticker strings (``SPY``). Simulated contracts use
-    ``.symbol``. Other brokers may expose ``trading_symbol``.
+    Alpaca contracts are ticker strings (``SPY``). Rithmic contracts expose
+    ``trading_symbol`` (``ESU6``). Simulated contracts use ``.symbol``.
     """
     if isinstance(contract, str):
         return contract

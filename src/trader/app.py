@@ -200,6 +200,10 @@ def _log_signal_catalog(settings: Settings) -> None:
         logger.warning(f"Could not fetch signal catalog: {exc}")
 
 
+_FLATTEN_ATTEMPTS = 3
+_FLATTEN_RETRY_S = 2.0
+
+
 def _close_all_positions(
     broker: BrokerBase,
     settings: Settings,
@@ -207,12 +211,15 @@ def _close_all_positions(
 ) -> float:
     """Flatten every open position at the broker.
 
-    Each close is recorded in *perf* so the daily summary is complete.
+    A close is recorded in *perf* only when ``place_order`` returns a result.
+    A failed submit is retried, then left open — never booked as a close from
+    a leftover last price.
     Returns the total dollar PnL realised by these exit trades.
     """
     from trader.models import Signal
 
     exit_pnl = 0.0
+    leftover = False
     try:
         pos_list = broker.get_positions_for_sync()
         if not pos_list:
@@ -233,12 +240,32 @@ def _close_all_positions(
             contract = broker.resolve_contract(sym)
             if contract is None:
                 logger.error(f"  -> Cannot resolve contract for {sym} — manual close required")
+                leftover = True
                 continue
 
             action = "SELL" if qty > 0 else "BUY"
-            trade = broker.place_order(contract, action, abs(qty))
+            trade = None
+            for attempt in range(1, _FLATTEN_ATTEMPTS + 1):
+                trade = broker.place_order(contract, action, abs(qty))
+                if trade is not None:
+                    break
+                if attempt < _FLATTEN_ATTEMPTS:
+                    logger.warning(
+                        f"  -> Flatten {action} {abs(qty):g}x {sym} failed "
+                        f"({attempt}/{_FLATTEN_ATTEMPTS}) — retrying in "
+                        f"{_FLATTEN_RETRY_S:.0f}s"
+                    )
+                    time.sleep(_FLATTEN_RETRY_S)
 
-            fill_price = trade.price if trade else None
+            if trade is None:
+                logger.error(
+                    f"  -> Flatten FAILED for {label} {abs(qty):g}x {sym} "
+                    "after retries — position still open, PnL not recorded"
+                )
+                leftover = True
+                continue
+
+            fill_price = trade.price
             if fill_price is None:
                 fill_price = broker.get_last_price(contract)
 
@@ -251,14 +278,22 @@ def _close_all_positions(
                 perf.record_close(sym, pnl, direction)
 
                 logger.info(
-                    f"  -> Closed {label} {abs(qty)}x {sym} @ {fill_price:.2f}  "
+                    f"  -> Closed {label} {abs(qty):g}x {sym} @ {fill_price:.2f}  "
                     f"PnL=${pnl:+,.2f}"
                 )
             else:
-                logger.info(f"  -> Closed {label} {abs(qty)}x {sym} (fill price unavailable)")
+                logger.info(
+                    f"  -> Flatten submitted for {label} {abs(qty):g}x {sym} "
+                    "— fill price unknown, PnL not recorded"
+                )
 
     except Exception as exc:
         logger.error(f"Error closing positions: {exc}")
+
+    if leftover:
+        logger.error(
+            "CLOSE: one or more positions were NOT flattened — check the broker UI"
+        )
 
     return exit_pnl
 
