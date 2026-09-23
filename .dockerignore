@@ -12,6 +12,9 @@ wheels/
 scripts/
 tests/
 
+# Work-in-progress brokers (no pyproject.toml yet)
+src/brokers/rithmic/
+
 # Logs (mounted as a volume at runtime)
 logs/
 
