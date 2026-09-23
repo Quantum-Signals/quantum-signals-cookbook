@@ -21,6 +21,55 @@ from qs_trader_symbols import (
 from trader.models import PerformanceTracker, Signal, sig_label
 from trader.strategy.base import StrategyBase
 
+
+def _build_capital_allocation(
+    settings: Settings,
+    active_symbols: list[str],
+) -> dict[str, float]:
+    """Build per-symbol capital allocation from settings.
+
+    Priority:
+      1. If ``symbol_capital`` is set for a symbol, use that exact value.
+      2. Otherwise, split ``daily_start_capital`` equally among symbols
+         not explicitly configured.
+
+    Returns a dict mapping canonical symbol → target daily notional.
+    """
+    n_symbols = max(len(active_symbols), 1)
+
+    # Check if any symbol has explicit capital allocation
+    if not settings.symbol_capital:
+        # No per-symbol config: equal split for all
+        default_capital = settings.daily_start_capital / n_symbols
+        return {sym: default_capital for sym in active_symbols}
+
+    # Normalize symbol_capital keys to canonical names
+    normalized_capital: dict[str, float] = {}
+    for sym, capital in settings.symbol_capital.items():
+        canon = canonicalize(sym)
+        key = canon if canon else sym
+        normalized_capital[key] = capital
+
+    # Build allocation: explicit config takes priority, others get equal split
+    # of remaining capital (or daily_start_capital / n_symbols as fallback)
+    allocation: dict[str, float] = {}
+    unconfigured: list[str] = []
+
+    for sym in active_symbols:
+        if sym in normalized_capital:
+            allocation[sym] = normalized_capital[sym]
+        else:
+            unconfigured.append(sym)
+
+    if unconfigured:
+        # Symbols without explicit config get equal share of daily_start_capital
+        # (fallback behavior for mixed configuration)
+        fallback = settings.daily_start_capital / n_symbols
+        for sym in unconfigured:
+            allocation[sym] = fallback
+
+    return allocation
+
 _TRADING_MINUTES_PER_DAY = 390  # 6.5 hours for US equities
 
 # Positions at or below this size are treated as flat when deciding whether an
@@ -123,7 +172,10 @@ class MomentumStrategy(StrategyBase):
 
         active_symbols = trading_targets(self._allowed)
         n_symbols = max(len(active_symbols), 1)
-        self._target_daily_notional_per_symbol = settings.daily_start_capital / n_symbols
+
+        # Build per-symbol capital allocation (supports weighted allocation)
+        self._target_daily_notional = _build_capital_allocation(settings, active_symbols)
+        total_allocated = sum(self._target_daily_notional.values())
 
         # Last known broker position / cost basis, refreshed from the broker
         # on every execution and by sync_positions().  Used for STABLE logging
@@ -135,14 +187,28 @@ class MomentumStrategy(StrategyBase):
         self._last_sync_time: float = 0.0
 
         execs_per_day = _TRADING_MINUTES_PER_DAY // self._interval_minutes
-        logger.info(
-            f"MomentumStrategy: interval={self._interval_minutes}min  "
-            f"execs/day={execs_per_day}  "
-            f"symbols={n_symbols}  "
-            f"target_per_symbol=${self._target_daily_notional_per_symbol:,.0f}  "
-            f"total_target=${settings.daily_start_capital:,.0f}  "
-            f"fractional={'yes' if self._use_fractional else 'no (whole-share)'}"
-        )
+
+        # Log capital allocation
+        if settings.symbol_capital:
+            logger.info(
+                f"MomentumStrategy: interval={self._interval_minutes}min  "
+                f"execs/day={execs_per_day}  "
+                f"symbols={n_symbols}  "
+                f"total_allocated=${total_allocated:,.0f}  "
+                f"fractional={'yes' if self._use_fractional else 'no (whole-share)'}"
+            )
+            for sym, capital in sorted(self._target_daily_notional.items()):
+                logger.info(f"  {sym}: ${capital:,.0f}")
+        else:
+            avg_per_symbol = total_allocated / n_symbols if n_symbols else 0
+            logger.info(
+                f"MomentumStrategy: interval={self._interval_minutes}min  "
+                f"execs/day={execs_per_day}  "
+                f"symbols={n_symbols}  "
+                f"target_per_symbol=${avg_per_symbol:,.0f}  "
+                f"total_target=${settings.daily_start_capital:,.0f}  "
+                f"fractional={'yes' if self._use_fractional else 'no (whole-share)'}"
+            )
 
     # ------------------------------------------------------------------
     # Multi-day lifecycle
@@ -296,9 +362,14 @@ class MomentumStrategy(StrategyBase):
             logger.warning(f"  -> No market data for {label} — skipping")
             return
 
+        # Get per-symbol capital allocation; fallback to equal split if not configured
+        target_notional = self._target_daily_notional.get(
+            canon,
+            self._settings.daily_start_capital / max(len(self._target_daily_notional), 1),
+        )
         slice_qty = _compute_order_qty(
             self._interval_minutes, price,
-            self._target_daily_notional_per_symbol,
+            target_notional,
             self._use_fractional,
             self._settings.contract_multipliers.get(pos_sym, 1.0),
         )

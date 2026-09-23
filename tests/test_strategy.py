@@ -615,3 +615,107 @@ class TestComputeOrderQty:
 
         qty = _compute_order_qty(5, 545.0, 50_000.0, use_fractional=False)
         assert qty == 1.0
+
+
+class TestCapitalAllocation:
+    """Tests for per-symbol capital allocation (TRADER_SYMBOL_CAPITAL)."""
+
+    def test_equal_split_no_symbol_capital(self):
+        """Without symbol_capital, capital splits equally across symbols."""
+        from trader.strategy.momentum import _build_capital_allocation
+
+        settings = _make_settings(
+            allowed_symbols=["ES", "NQ"],
+            daily_start_capital=100_000,
+        )
+        active = ["ES", "NQ"]
+        alloc = _build_capital_allocation(settings, active)
+
+        assert alloc["ES"] == 50_000
+        assert alloc["NQ"] == 50_000
+
+    def test_single_symbol_gets_all_capital(self):
+        """A single symbol receives full daily_start_capital."""
+        from trader.strategy.momentum import _build_capital_allocation
+
+        settings = _make_settings(
+            allowed_symbols=["RTY"],
+            daily_start_capital=100_000,
+        )
+        active = ["RTY"]
+        alloc = _build_capital_allocation(settings, active)
+
+        assert alloc["RTY"] == 100_000
+
+    def test_explicit_per_symbol_capital(self):
+        """symbol_capital overrides equal split."""
+        from trader.strategy.momentum import _build_capital_allocation
+
+        settings = _make_settings(
+            allowed_symbols=["RTY", "YM"],
+            daily_start_capital=100_000,
+            symbol_capital={"RTY": 70_000, "YM": 30_000},
+        )
+        active = ["RTY", "YM"]
+        alloc = _build_capital_allocation(settings, active)
+
+        assert alloc["RTY"] == 70_000
+        assert alloc["YM"] == 30_000
+
+    def test_partial_symbol_capital_uses_fallback(self):
+        """Symbols without explicit config get daily_start_capital / n fallback."""
+        from trader.strategy.momentum import _build_capital_allocation
+
+        settings = _make_settings(
+            allowed_symbols=["RTY", "YM", "ES"],
+            daily_start_capital=150_000,
+            symbol_capital={"RTY": 100_000},  # YM and ES not specified
+        )
+        active = ["RTY", "YM", "ES"]
+        alloc = _build_capital_allocation(settings, active)
+
+        assert alloc["RTY"] == 100_000
+        # YM and ES get equal split: 150k / 3 = 50k each
+        assert alloc["YM"] == 50_000
+        assert alloc["ES"] == 50_000
+
+    def test_symbol_capital_string_parsing(self):
+        """symbol_capital accepts 'SYM:AMOUNT,SYM:AMOUNT' string format."""
+        settings = _make_settings(
+            allowed_symbols=["RTY", "YM"],
+            daily_start_capital=100_000,
+            symbol_capital="RTY:80000,YM:20000",
+        )
+        assert settings.symbol_capital == {"RTY": 80_000, "YM": 20_000}
+
+    def test_symbol_capital_alias_normalization(self):
+        """symbol_capital keys are normalized to canonical names."""
+        from trader.strategy.momentum import _build_capital_allocation
+
+        # User uses ETF names (IWM, DIA) but active_symbols are canonical (RTY, YM)
+        settings = _make_settings(
+            allowed_symbols=["IWM", "DIA"],
+            daily_start_capital=100_000,
+            symbol_capital={"IWM": 60_000, "DIA": 40_000},
+        )
+        active = ["RTY", "YM"]  # Canonical names after parsing
+        alloc = _build_capital_allocation(settings, active)
+
+        assert alloc["RTY"] == 60_000
+        assert alloc["YM"] == 40_000
+
+    def test_momentum_strategy_uses_per_symbol_capital(self):
+        """MomentumStrategy applies per-symbol notional to order sizing."""
+        settings = _make_settings(
+            allowed_symbols=["ES", "NQ"],
+            daily_start_capital=100_000,
+            symbol_capital={"ES": 80_000, "NQ": 20_000},
+        )
+        broker = SimulatedBroker(SimulatedSettings(price_jitter=0.0))
+        broker.connect()
+        perf = PerformanceTracker()
+        strategy = MomentumStrategy(broker, perf, settings)
+
+        # Verify internal allocation
+        assert strategy._target_daily_notional["ES"] == 80_000
+        assert strategy._target_daily_notional["NQ"] == 20_000

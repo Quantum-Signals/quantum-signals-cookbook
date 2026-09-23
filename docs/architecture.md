@@ -271,12 +271,26 @@ qty_per_slice           = target_daily_notional_per_symbol / (executions_per_day
 
 **Budget split:**
 
+By default, capital is split equally across active symbols:
+
 ```
 target_daily_notional_per_symbol = TRADER_DAILY_START_CAPITAL / n_active_symbols
 ```
 
 - `n_active_symbols` = count of canonical instruments from `trading_targets()` (minimum 1). Empty `TRADER_ALLOWED_SYMBOLS` → every instrument in the catalog.
 - Example: `$100,000` capital, `TRADER_ALLOWED_SYMBOLS=ES,NQ` → **$50,000 notional per symbol per day**
+
+**Weighted allocation (optional):**
+
+Use `TRADER_SYMBOL_CAPITAL` to override equal split with explicit per-symbol budgets:
+
+```env
+TRADER_SYMBOL_CAPITAL=ES:60000,NQ:40000
+```
+
+- Symbols with explicit config use that exact amount
+- Symbols not listed fall back to `TRADER_DAILY_START_CAPITAL / n_active_symbols`
+- Any alias works: `SPY:60000` normalizes to canonical `ES`
 
 **Broker rounding:**
 
@@ -287,7 +301,7 @@ target_daily_notional_per_symbol = TRADER_DAILY_START_CAPITAL / n_active_symbols
 
 Doubling `TRADER_EXECUTION_INTERVAL_MINUTES` halves `executions_per_day` and **doubles** `qty_per_slice`, keeping approximate daily notional stable.
 
-#### Worked example
+#### Worked example (equal split)
 
 | Input | Value |
 |-------|-------|
@@ -295,7 +309,7 @@ Doubling `TRADER_EXECUTION_INTERVAL_MINUTES` halves `executions_per_day` and **d
 | Active symbols | ES, NQ (2) |
 | `TRADER_EXECUTION_INTERVAL_MINUTES` | 5 |
 | `executions_per_day` | 390 / 5 = **78** |
-| Per-symbol budget | $50,000 |
+| Per-symbol budget | $50,000 (equal split) |
 | SPY price | $545 |
 
 ```
@@ -303,6 +317,24 @@ qty_per_slice = 50_000 / (78 × 545) ≈ 1.1776 shares  (Alpaca)
 ```
 
 On a whole-share broker the same inputs yield `max(1, round(1.1776)) = 1` share per slice.
+
+#### Worked example (weighted allocation)
+
+| Input | Value |
+|-------|-------|
+| `TRADER_SYMBOL_CAPITAL` | `RTY:1500000,YM:500000` |
+| Active symbols | RTY → IWM, YM → DIA |
+| `TRADER_EXECUTION_INTERVAL_MINUTES` | 5 |
+| `executions_per_day` | 390 / 5 = **78** |
+| IWM price | $220 |
+| DIA price | $420 |
+
+```
+RTY (IWM): qty_per_slice = 1,500,000 / (78 × 220) ≈ 87.4 shares
+YM  (DIA): qty_per_slice =   500,000 / (78 × 420) ≈ 15.3 shares
+```
+
+The 3:1 capital ratio produces ~6× more IWM shares (due to lower price).
 
 #### Per-interval behavior (`handle_signal`)
 
@@ -393,7 +425,8 @@ Full operator reference (env vars, strategies, symbols, paper vs live): [README.
 | Variable | Effect |
 |----------|--------|
 | `TRADER_STRATEGY` | Strategy name (`momentum`) |
-| `TRADER_DAILY_START_CAPITAL` | Per-symbol daily notional budget for order sizing |
+| `TRADER_DAILY_START_CAPITAL` | Per-symbol daily notional budget for order sizing (used when `TRADER_SYMBOL_CAPITAL` not set) |
+| `TRADER_SYMBOL_CAPITAL` | Per-symbol capital allocation (e.g. `ES:60000,NQ:40000`); overrides equal split |
 | `TRADER_EXECUTION_INTERVAL_MINUTES` | Execution gate (one trade per symbol per interval) |
 | `TRADER_ALLOWED_SYMBOLS` | Filters QS symbols (any alias: `ES`, `SPY`, `S&P500`) |
 | `TRADER_BROKER` | Selects the broker (`simulated` = no real orders, the default); drives fractional vs whole-share sizing |
