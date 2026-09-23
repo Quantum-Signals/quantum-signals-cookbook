@@ -19,6 +19,39 @@ from .settings import RithmicSettings
 
 _CONTRACT_MONTH_CODES = "FGHJKMNQUVXZ"
 
+# ---------------------------------------------------------------------------
+# Rithmic / OMNE attribution (required for commercial conformance)
+# ---------------------------------------------------------------------------
+_RITHMIC_ATTRIBUTION = """
+================================================================================
+                      ╔═══════════════════════════════════════╗
+                      ║   TRADING PLATFORM BY RITHMIC™        ║
+                      ╚═══════════════════════════════════════╝
+
+                           ┌─────────────────────────┐
+                           │    POWERED BY OMNE™     │
+                           └─────────────────────────┘
+
+  The R | Protocol API™ software is Copyright © 2026 by Rithmic, LLC.
+  All rights reserved.
+
+  Trading Platform by Rithmic™ is a trademark of Rithmic, LLC.
+  All rights reserved.
+
+  The OMNE™ software is Copyright © 2026 by Omnesys, LLC and
+  Omnesys Technologies, Inc. All rights reserved.
+
+  Powered by OMNE™ is a trademark of Omnesys, LLC and
+  Omnesys Technologies, Inc. All rights reserved.
+================================================================================
+"""
+
+
+def _log_rithmic_attribution() -> None:
+    """Print the required Rithmic/OMNE logos and notices after connect."""
+    for line in _RITHMIC_ATTRIBUTION.strip().splitlines():
+        logger.info(line)
+
 
 @dataclass(frozen=True)
 class RithmicContract:
@@ -335,6 +368,7 @@ class RithmicBroker(BrokerBase):
             f"ib={getattr(client, 'ib_id', '')}  "
             f"accounts={account_ids or ['(none)']}"
         )
+        _log_rithmic_attribution()
 
     def disconnect(self) -> None:
         client = self._client
