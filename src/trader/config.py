@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     daily_start_capital: float = 1_000_000.0
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
     execution_interval_minutes: int = 5
+    # How often to print the account info panel. Independent of decision interval.
+    #   0 or negative = print after each BUY/SELL action (default, recommended)
+    #   positive N    = print every N minutes
+    account_info_interval_minutes: int = 0
     # Session end: trader closes all positions and logs the daily summary at
     # this local time. Format: "HH:MM" (24-hour). Set to 15:55 NY so the EOD
     # flatten executes during regular-hours liquidity (5 min before the close)

@@ -19,3 +19,7 @@ logs/
 
 # Debugging
 sync.sh
+
+# OpenSpec (development workflow, not needed by users)
+openspec/
+.cursor/
