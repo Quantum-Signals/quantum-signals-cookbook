@@ -25,6 +25,33 @@ _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
 }
 
 
+def _parse_symbol_capital(value: str | dict[str, float] | None) -> dict[str, float]:
+    """Parse per-symbol capital allocation from env var.
+
+    Accepts formats:
+      - ``"RTY:1000000,YM:500000"`` (comma-separated pairs)
+      - ``{"RTY": 1000000, "YM": 500000}`` (dict, e.g. from JSON)
+      - ``None`` or empty → empty dict (use equal split from daily_start_capital)
+    """
+    if value is None or value == "":
+        return {}
+    if isinstance(value, dict):
+        return {k: float(v) for k, v in value.items()}
+    result: dict[str, float] = {}
+    for pair in str(value).split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if ":" not in pair:
+            raise ValueError(
+                f"Invalid symbol_capital format: '{pair}'. "
+                f"Expected 'SYMBOL:AMOUNT' (e.g. 'RTY:1000000')"
+            )
+        sym, amt = pair.split(":", 1)
+        result[sym.strip()] = float(amt.strip())
+    return result
+
+
 class Settings(BaseSettings):
     """App-level (orchestration) settings, loaded from ``TRADER_*`` env vars.
 
@@ -62,6 +89,11 @@ class Settings(BaseSettings):
     allowed_symbols: Annotated[list[str], NoDecode] = []
     close_on_exit: bool = True
     daily_start_capital: float = 1_000_000.0
+    # Per-symbol capital allocation. Format: ``"RTY:1000000,YM:500000"``.
+    # If set, overrides equal-split of ``daily_start_capital``. Symbols not
+    # listed here but present in ``allowed_symbols`` get
+    # ``daily_start_capital / n_symbols`` as fallback.
+    symbol_capital: Annotated[dict[str, float], NoDecode] = {}
     signal_queue_maxsize: int = 0  # 0 = unlimited (Queue default)
     execution_interval_minutes: int = 5
     # How often to print the account info panel. Independent of decision interval.
@@ -101,6 +133,14 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
         return v
+
+    @field_validator("symbol_capital", mode="before")
+    @classmethod
+    def _parse_symbol_capital(cls, v: object) -> dict[str, float]:
+        """Parse per-symbol capital: ``"RTY:1000000,YM:500000"`` or dict."""
+        if v is None or v == "":
+            return {}
+        return _parse_symbol_capital(v)  # type: ignore[arg-type]
 
 
 def _parse_cli_args() -> argparse.Namespace:

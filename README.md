@@ -119,8 +119,27 @@ Alpaca credentials are required only when `TRADER_BROKER=alpaca`:
 | Variable | Default | Description |
 |---|---|---|
 | `TRADER_CLOSE_ON_EXIT` | `true` | Flatten all open positions when the bot stops |
-| `TRADER_DAILY_START_CAPITAL` | `100000` | Splits this notional across active symbols for order sizing |
+| `TRADER_DAILY_START_CAPITAL` | `100000` | Splits this notional across active symbols for order sizing (used when `TRADER_SYMBOL_CAPITAL` is not set) |
+| `TRADER_SYMBOL_CAPITAL` | *(empty)* | Per-symbol capital allocation (e.g. `ES:60000,NQ:40000`). Overrides equal split of `TRADER_DAILY_START_CAPITAL` |
 | `TRADER_SIGNAL_QUEUE_MAXSIZE` | `0` | Max buffered signals (`0` = unlimited) |
+
+#### Per-symbol capital allocation
+
+By default, `TRADER_DAILY_START_CAPITAL` is split equally across all active symbols. Use `TRADER_SYMBOL_CAPITAL` for weighted allocation:
+
+```env
+# Equal split (default): $100k ÷ 2 = $50k per symbol
+TRADER_ALLOWED_SYMBOLS=ES,NQ
+TRADER_DAILY_START_CAPITAL=100000
+
+# Weighted allocation: 60% ES, 40% NQ
+TRADER_ALLOWED_SYMBOLS=ES,NQ
+TRADER_SYMBOL_CAPITAL=ES:60000,NQ:40000
+```
+
+- Format: `SYMBOL:AMOUNT,SYMBOL:AMOUNT` (comma-separated pairs)
+- Any alias works: `SPY:60000` is equivalent to `ES:60000`
+- Partial configuration: symbols not listed fall back to `TRADER_DAILY_START_CAPITAL / n_symbols`
 
 ### Session window & multi-day mode
 
@@ -162,7 +181,7 @@ symbols via the shared catalog in `qs_trader_symbols`.
 Incrementally builds a sized position on a fixed time grid (`TRADER_EXECUTION_INTERVAL_MINUTES`, default 5 min).
 
 - **When it trades:** at most **one execution per symbol per interval**, gated on the signal's own timestamp (not wall-clock arrival time).
-- **Order size:** each UP/DOWN slice is sized so daily notional ≈ `TRADER_DAILY_START_CAPITAL / n_active_symbols` (e.g. $100k across ES + NQ → ~$50k per symbol per day).
+- **Order size:** each UP/DOWN slice is sized so daily notional ≈ `TRADER_DAILY_START_CAPITAL / n_active_symbols` (e.g. $100k across ES + NQ → ~$50k per symbol per day). Use `TRADER_SYMBOL_CAPITAL` for weighted allocation (e.g. `ES:60000,NQ:40000`).
 - **Broker reconciliation:** every tick re-reads the broker position and plans close-then-open legs, so failed orders, partial fills, or manual trades self-heal on the next interval.
 - **Fractional shares:** enabled on Alpaca (fractional longs; whole-share shorts with a reserve for sub-share intent). Whole-share brokers round each slice to whole shares.
 
