@@ -13,7 +13,7 @@ from trader.access_control import run_startup_access_checks
 from trader.config import Settings, load_settings
 from trader.brokers import BrokerBase, create_broker
 from trader.models import PerformanceTracker
-from trader.reporting import report_once
+from trader.reporting import report_once, ReportContext, ScheduleInfo, SizingInfo
 from trader.strategy.base import StrategyBase
 from trader.strategy.momentum import MomentumStrategy
 from trader.streaming import stream_signals_thread
@@ -281,8 +281,28 @@ def _run_trading_day(
     report_interval_s = 300.0
     tick_interval_s = 1.0
     poll_s = 0.05
-    next_report_at = time.monotonic() + report_interval_s
+    next_report_mono = time.monotonic() + report_interval_s
     next_tick_at = time.monotonic()
+
+    # Build schedule info for reports
+    # Exit window is typically 5 minutes before session end through market close
+    exit_window_start = settings.session_end_time  # e.g., "15:55"
+    # Parse and add 5 minutes for exit window end
+    eh, em = _parse_hhmm(settings.session_end_time)
+    exit_end_h, exit_end_m = eh, em + 5
+    if exit_end_m >= 60:
+        exit_end_h += 1
+        exit_end_m -= 60
+    exit_window_end = f"{exit_end_h:02d}:{exit_end_m:02d}"
+
+    schedule = ScheduleInfo(
+        session_start_time=settings.session_start_time,
+        session_end_time=settings.session_end_time,
+        exit_window_start=exit_window_start,
+        exit_window_end=exit_window_end,
+        decision_interval_minutes=settings.execution_interval_minutes,
+        session_timezone=settings.session_timezone,
+    )
 
     while not stop_event.is_set():
         try:
@@ -308,9 +328,23 @@ def _run_trading_day(
                 logger.exception(f"Strategy tick error: {exc}")
             next_tick_at = now_mono + tick_interval_s
 
-        if now_mono >= next_report_at:
-            report_once(broker, perf)
-            next_report_at = now_mono + report_interval_s
+        if now_mono >= next_report_mono:
+            # Build report context with sizing info from strategy
+            next_report_at = datetime.now(tz) + timedelta(seconds=report_interval_s)
+            sizing_info = _get_sizing_info(strategy, broker, settings)
+            # Notional/Decision = sum of per-symbol $/decision (what we target per decision point)
+            notional_per_decision = sum(s.dollars_per_decision for s in sizing_info)
+            ctx = ReportContext(
+                user_tz=tz,
+                report_interval_s=report_interval_s,
+                next_report_at=next_report_at,
+                schedule=schedule,
+                notional_per_decision=notional_per_decision,
+                sizing_info=sizing_info,
+                contract_multipliers=settings.contract_multipliers,
+            )
+            report_once(broker, perf, ctx)
+            next_report_mono = now_mono + report_interval_s
 
         if datetime.now(tz) >= eod_dt:
             logger.info(
@@ -322,6 +356,69 @@ def _run_trading_day(
         time.sleep(poll_s)
 
     return False
+
+
+def _get_sizing_info(
+    strategy: StrategyBase,
+    broker: BrokerBase,
+    settings: Settings,
+) -> list[SizingInfo]:
+    """Extract sizing information from the strategy for reporting."""
+    sizing_info: list[SizingInfo] = []
+
+    # Check if strategy has the attributes we need (MomentumStrategy does)
+    if not hasattr(strategy, "_target_daily_notional_per_symbol"):
+        return sizing_info
+
+    from qs_trader_symbols import trading_targets, parse_allowed_symbols
+
+    allowed = parse_allowed_symbols(settings.allowed_symbols)
+    active_symbols = trading_targets(allowed)
+
+    interval_minutes = settings.execution_interval_minutes
+    trading_minutes = 390  # 6.5 hours
+    execs_per_day = trading_minutes // interval_minutes
+
+    target_per_symbol = getattr(strategy, "_target_daily_notional_per_symbol", 0.0)
+    use_fractional = getattr(strategy, "_use_fractional", False)
+
+    for sym in active_symbols:
+        contract = broker.resolve_contract(sym)
+        if contract is None:
+            continue
+
+        price = broker.get_last_price(contract)
+        if price is None or price <= 0:
+            continue
+
+        # Position symbol for multiplier lookup
+        pos_sym = sym
+        if isinstance(contract, str):
+            pos_sym = contract
+        elif hasattr(contract, "symbol"):
+            pos_sym = contract.symbol
+
+        multiplier = settings.contract_multipliers.get(pos_sym, 1.0)
+        point_value = price * multiplier
+
+        # Calculate units per decision
+        raw_units = target_per_symbol / (execs_per_day * point_value) if execs_per_day > 0 and point_value > 0 else 0
+        if use_fractional:
+            units = round(raw_units, 4)
+        else:
+            units = float(max(1, round(raw_units)))
+
+        # Dollars per decision
+        dollars = units * point_value
+
+        sizing_info.append(SizingInfo(
+            symbol=pos_sym,
+            dollars_per_decision=dollars,
+            units_per_decision=units,
+            mkt_price=price,
+        ))
+
+    return sizing_info
 
 
 def _log_day_summary(

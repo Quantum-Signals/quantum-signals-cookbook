@@ -242,7 +242,7 @@ class MomentumStrategy(StrategyBase):
             # Passthrough symbol (not in catalog) — broker resolves directly.
             canon = sym
 
-        self.perf.signal_counts[sig] += 1
+        self.perf.record_signal(canon, sig)
         logger.info(f"Signal  {sym}  {sig_label(sig)}  model={signal.model}  ts={ts}")
 
         # Gate on the signal's own timestamp rather than wall-clock time.
@@ -356,6 +356,11 @@ class MomentumStrategy(StrategyBase):
                 break
             signed_qty = leg.qty if leg.action == "BUY" else -leg.qty
             multiplier = self._settings.contract_multipliers.get(pos_sym, 1.0)
+
+            # Record trade action: map (action, intent) → (BUY, SELL, SHORT, COVER)
+            trade_action = _map_trade_action(leg.action, leg.intent)
+            self.perf.record_trade(canon, trade_action, leg.qty)
+
             logger.info(
                 f"  -> {leg.action} {_fmt_qty(leg.qty)}x {label} @ {price:.2f}  "
                 f"notional=${leg.qty * price * multiplier:,.2f}  "
@@ -665,6 +670,20 @@ def _leg_label(leg: _Leg) -> str:
     if leg.intent == "close":
         return "cover" if leg.action == "BUY" else "close"
     return "long" if leg.action == "BUY" else "short"
+
+
+def _map_trade_action(action: str, intent: str) -> str:
+    """Map broker order (action, intent) to trade action for reporting.
+
+    - BUY + open → BUY (adding to long position)
+    - BUY + close → COVER (closing short position)
+    - SELL + close → SELL (closing long position)
+    - SELL + open → SHORT (opening short position)
+    """
+    if action == "BUY":
+        return "COVER" if intent == "close" else "BUY"
+    else:  # SELL
+        return "SELL" if intent == "close" else "SHORT"
 
 
 def _fmt_qty(qty: float) -> str:
