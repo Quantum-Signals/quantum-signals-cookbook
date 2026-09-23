@@ -278,11 +278,20 @@ def _run_trading_day(
     Returns True if the loop exited because EOD was reached, False if it was
     interrupted (e.g. Ctrl-C, fatal stream error).
     """
-    report_interval_s = 300.0
+    # Account info reporting mode (TRADER_ACCOUNT_INFO_INTERVAL_MINUTES):
+    #   <= 0: report after each trade (on-trade mode, default)
+    #   > 0:  report every N minutes (time-based mode)
+    info_interval = settings.account_info_interval_minutes
+    use_time_based_reports = info_interval > 0
+    report_interval_s = info_interval * 60.0 if use_time_based_reports else 0.0
+
     tick_interval_s = 1.0
     poll_s = 0.05
-    next_report_mono = time.monotonic() + report_interval_s
+    next_report_mono = time.monotonic() + report_interval_s if use_time_based_reports else float('inf')
     next_tick_at = time.monotonic()
+
+    # Track trade count to detect when trades occur (for on-trade reporting)
+    last_trade_count = perf.total_trades
 
     # Build schedule info for reports
     # Exit window is typically 5 minutes before session end through market close
@@ -303,6 +312,26 @@ def _run_trading_day(
         decision_interval_minutes=settings.execution_interval_minutes,
         session_timezone=settings.session_timezone,
     )
+
+    def _do_report() -> None:
+        """Generate and log the account info panel."""
+        sizing_info = _get_sizing_info(strategy, broker, settings)
+        notional_per_decision = sum(s.dollars_per_decision for s in sizing_info)
+        # For on-trade mode, next_report_at is N/A; for time-based, calculate it
+        if use_time_based_reports:
+            next_at = datetime.now(tz) + timedelta(seconds=report_interval_s)
+        else:
+            next_at = datetime.now(tz)  # Placeholder for on-trade mode
+        ctx = ReportContext(
+            user_tz=tz,
+            report_interval_s=report_interval_s,
+            next_report_at=next_at,
+            schedule=schedule,
+            notional_per_decision=notional_per_decision,
+            sizing_info=sizing_info,
+            contract_multipliers=settings.contract_multipliers,
+        )
+        report_once(broker, perf, ctx)
 
     while not stop_event.is_set():
         try:
@@ -328,23 +357,23 @@ def _run_trading_day(
                 logger.exception(f"Strategy tick error: {exc}")
             next_tick_at = now_mono + tick_interval_s
 
-        if now_mono >= next_report_mono:
-            # Build report context with sizing info from strategy
-            next_report_at = datetime.now(tz) + timedelta(seconds=report_interval_s)
-            sizing_info = _get_sizing_info(strategy, broker, settings)
-            # Notional/Decision = sum of per-symbol $/decision (what we target per decision point)
-            notional_per_decision = sum(s.dollars_per_decision for s in sizing_info)
-            ctx = ReportContext(
-                user_tz=tz,
-                report_interval_s=report_interval_s,
-                next_report_at=next_report_at,
-                schedule=schedule,
-                notional_per_decision=notional_per_decision,
-                sizing_info=sizing_info,
-                contract_multipliers=settings.contract_multipliers,
-            )
-            report_once(broker, perf, ctx)
-            next_report_mono = now_mono + report_interval_s
+        # Check if we should show the account info panel
+        should_report = False
+
+        if use_time_based_reports:
+            # Time-based mode: report every N minutes
+            if now_mono >= next_report_mono:
+                should_report = True
+                next_report_mono = now_mono + report_interval_s
+        else:
+            # On-trade mode: report after each trade
+            current_trade_count = perf.total_trades
+            if current_trade_count > last_trade_count:
+                should_report = True
+                last_trade_count = current_trade_count
+
+        if should_report:
+            _do_report()
 
         if datetime.now(tz) >= eod_dt:
             logger.info(

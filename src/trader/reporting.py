@@ -171,14 +171,21 @@ def _build_info_block(
 ) -> list[str]:
     """Build the INFO section."""
     ts = now.astimezone(ctx.user_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
-    interval_min = int(ctx.report_interval_s / 60)
-    next_ts = ctx.next_report_at.astimezone(ctx.user_tz).strftime("%H:%M:%S")
+
+    # Handle on-trade mode (interval <= 0) vs time-based mode (interval > 0)
+    if ctx.report_interval_s <= 0:
+        interval_str = "on-trade"
+        next_str = "after next trade"
+    else:
+        interval_min = int(ctx.report_interval_s / 60)
+        interval_str = f"{interval_min}min"
+        next_str = ctx.next_report_at.astimezone(ctx.user_tz).strftime("%H:%M:%S")
 
     return [
         "INFO",
         f"  ts            : {ts}",
-        f"  interval      : {interval_min}min",
-        f"  next          : {next_ts}",
+        f"  interval      : {interval_str}",
+        f"  next          : {next_str}",
     ]
 
 
