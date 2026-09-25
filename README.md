@@ -139,7 +139,21 @@ TRADER_SYMBOL_CAPITAL=ES:60000,NQ:40000
 
 - Format: `SYMBOL:AMOUNT,SYMBOL:AMOUNT` (comma-separated pairs)
 - Any alias works: `SPY:60000` is equivalent to `ES:60000`
-- Partial configuration: symbols not listed fall back to `TRADER_DAILY_START_CAPITAL / n_symbols`
+- **Partial configuration:** symbols not listed get equal share of the **remaining** capital after explicit allocations (not `TRADER_DAILY_START_CAPITAL / n_symbols`)
+
+**Example (partial configuration):**
+```env
+TRADER_DAILY_START_CAPITAL=150000
+TRADER_ALLOWED_SYMBOLS=RTY,YM,ES
+TRADER_SYMBOL_CAPITAL=RTY:100000  # Only RTY specified
+```
+- RTY → $100,000 (explicit)
+- YM → $25,000 (remaining $50k ÷ 2)
+- ES → $25,000 (remaining $50k ÷ 2)
+
+**Warnings:** The bot logs warnings at startup if:
+- A symbol in `TRADER_SYMBOL_CAPITAL` is not in `TRADER_ALLOWED_SYMBOLS` (allocation ignored)
+- Explicit allocations exceed `TRADER_DAILY_START_CAPITAL` (unconfigured symbols get $0)
 
 ### Session window & multi-day mode
 

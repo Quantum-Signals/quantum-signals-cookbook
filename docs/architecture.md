@@ -289,8 +289,29 @@ TRADER_SYMBOL_CAPITAL=ES:60000,NQ:40000
 ```
 
 - Symbols with explicit config use that exact amount
-- Symbols not listed fall back to `TRADER_DAILY_START_CAPITAL / n_active_symbols`
+- **Symbols not listed get equal share of the remaining capital** after explicit allocations
 - Any alias works: `SPY:60000` normalizes to canonical `ES`
+
+**Example (partial configuration):**
+
+```env
+TRADER_DAILY_START_CAPITAL=150000
+TRADER_ALLOWED_SYMBOLS=RTY,YM,ES
+TRADER_SYMBOL_CAPITAL=RTY:100000
+```
+
+| Symbol | Allocation | Calculation |
+|--------|------------|-------------|
+| RTY | $100,000 | explicit |
+| YM | $25,000 | ($150k - $100k) ÷ 2 |
+| ES | $25,000 | ($150k - $100k) ÷ 2 |
+| **Total** | $150,000 | ✓ matches `TRADER_DAILY_START_CAPITAL` |
+
+**Startup warnings:**
+
+The strategy logs warnings if:
+- A symbol in `TRADER_SYMBOL_CAPITAL` is not in `TRADER_ALLOWED_SYMBOLS` → allocation ignored
+- Sum of explicit allocations exceeds `TRADER_DAILY_START_CAPITAL` → unconfigured symbols get $0
 
 **Broker rounding:**
 

@@ -142,6 +142,28 @@ class Settings(BaseSettings):
             return {}
         return _parse_symbol_capital(v)  # type: ignore[arg-type]
 
+    @field_validator("execution_interval_minutes")
+    @classmethod
+    def _validate_interval(cls, v: int) -> int:
+        """Execution interval must be positive to avoid division by zero."""
+        if v <= 0:
+            raise ValueError(
+                f"execution_interval_minutes must be positive (got {v}). "
+                "Use at least 1 minute."
+            )
+        return v
+
+    @field_validator("daily_start_capital")
+    @classmethod
+    def _validate_capital(cls, v: float) -> float:
+        """Daily start capital must be positive for meaningful order sizing."""
+        if v <= 0:
+            raise ValueError(
+                f"daily_start_capital must be positive (got {v}). "
+                "Set to your desired daily notional exposure."
+            )
+        return v
+
 
 def _parse_cli_args() -> argparse.Namespace:
     """Parse our CLI flags. Skip entirely under Jupyter: kernels inject argv (e.g. -f …json)."""

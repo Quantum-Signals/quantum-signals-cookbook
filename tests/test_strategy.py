@@ -662,8 +662,8 @@ class TestCapitalAllocation:
         assert alloc["RTY"] == 70_000
         assert alloc["YM"] == 30_000
 
-    def test_partial_symbol_capital_uses_fallback(self):
-        """Symbols without explicit config get daily_start_capital / n fallback."""
+    def test_partial_symbol_capital_uses_remaining(self):
+        """Symbols without explicit config get equal share of remaining capital."""
         from trader.strategy.momentum import _build_capital_allocation
 
         settings = _make_settings(
@@ -675,9 +675,31 @@ class TestCapitalAllocation:
         alloc = _build_capital_allocation(settings, active)
 
         assert alloc["RTY"] == 100_000
-        # YM and ES get equal split: 150k / 3 = 50k each
+        # YM and ES get equal split of remaining: (150k - 100k) / 2 = 25k each
+        assert alloc["YM"] == 25_000
+        assert alloc["ES"] == 25_000
+
+    def test_symbol_capital_ignores_unknown_symbol(self):
+        """Symbols in symbol_capital but not in allowed_symbols are ignored.
+
+        The function logs a warning (visible in test stderr) but continues.
+        """
+        from trader.strategy.momentum import _build_capital_allocation
+
+        settings = _make_settings(
+            allowed_symbols=["RTY", "YM"],
+            daily_start_capital=100_000,
+            symbol_capital={"RTY": 50_000, "UNKNOWN": 30_000},  # UNKNOWN not in allowed
+        )
+        active = ["RTY", "YM"]
+
+        alloc = _build_capital_allocation(settings, active)
+
+        # RTY gets explicit, YM gets remaining (100k - 50k = 50k)
+        assert alloc["RTY"] == 50_000
         assert alloc["YM"] == 50_000
-        assert alloc["ES"] == 50_000
+        # UNKNOWN is not in allocation (ignored with warning)
+        assert "UNKNOWN" not in alloc
 
     def test_symbol_capital_string_parsing(self):
         """symbol_capital accepts 'SYM:AMOUNT,SYM:AMOUNT' string format."""
@@ -719,3 +741,55 @@ class TestCapitalAllocation:
         # Verify internal allocation
         assert strategy._target_daily_notional["ES"] == 80_000
         assert strategy._target_daily_notional["NQ"] == 20_000
+
+
+class TestSettingsValidation:
+    """Tests for Settings validation."""
+
+    def test_execution_interval_must_be_positive(self):
+        """execution_interval_minutes=0 raises ValueError."""
+        import pytest
+        from trader.config import Settings
+
+        with pytest.raises(ValueError, match="must be positive"):
+            Settings(
+                _env_file=None,
+                qs_api_key="test",
+                execution_interval_minutes=0,
+            )
+
+    def test_execution_interval_negative_raises(self):
+        """Negative execution_interval_minutes raises ValueError."""
+        import pytest
+        from trader.config import Settings
+
+        with pytest.raises(ValueError, match="must be positive"):
+            Settings(
+                _env_file=None,
+                qs_api_key="test",
+                execution_interval_minutes=-5,
+            )
+
+    def test_daily_start_capital_must_be_positive(self):
+        """daily_start_capital=0 raises ValueError."""
+        import pytest
+        from trader.config import Settings
+
+        with pytest.raises(ValueError, match="must be positive"):
+            Settings(
+                _env_file=None,
+                qs_api_key="test",
+                daily_start_capital=0,
+            )
+
+    def test_daily_start_capital_negative_raises(self):
+        """Negative daily_start_capital raises ValueError."""
+        import pytest
+        from trader.config import Settings
+
+        with pytest.raises(ValueError, match="must be positive"):
+            Settings(
+                _env_file=None,
+                qs_api_key="test",
+                daily_start_capital=-1000,
+            )

@@ -414,10 +414,12 @@ def _get_sizing_info(
     for sym in active_symbols:
         contract = broker.resolve_contract(sym)
         if contract is None:
+            logger.debug(f"[sizing] Skipping {sym}: no tradable contract")
             continue
 
         price = broker.get_last_price(contract)
         if price is None or price <= 0:
+            logger.debug(f"[sizing] Skipping {sym}: no market price available")
             continue
 
         # Position symbol for multiplier lookup

@@ -30,8 +30,8 @@ def _build_capital_allocation(
 
     Priority:
       1. If ``symbol_capital`` is set for a symbol, use that exact value.
-      2. Otherwise, split ``daily_start_capital`` equally among symbols
-         not explicitly configured.
+      2. Otherwise, split the **remaining** capital (after explicit allocations)
+         equally among unconfigured symbols.
 
     Returns a dict mapping canonical symbol → target daily notional.
     """
@@ -50,23 +50,49 @@ def _build_capital_allocation(
         key = canon if canon else sym
         normalized_capital[key] = capital
 
+    # Warn about symbols in symbol_capital that aren't in active_symbols
+    active_set = set(active_symbols)
+    for sym in normalized_capital:
+        if sym not in active_set:
+            logger.warning(
+                f"[capital] Symbol '{sym}' in TRADER_SYMBOL_CAPITAL is not in "
+                f"TRADER_ALLOWED_SYMBOLS — this allocation will be ignored"
+            )
+
     # Build allocation: explicit config takes priority, others get equal split
-    # of remaining capital (or daily_start_capital / n_symbols as fallback)
+    # of remaining capital after explicit allocations
     allocation: dict[str, float] = {}
     unconfigured: list[str] = []
+    explicit_total = 0.0
 
     for sym in active_symbols:
         if sym in normalized_capital:
             allocation[sym] = normalized_capital[sym]
+            explicit_total += normalized_capital[sym]
         else:
             unconfigured.append(sym)
 
     if unconfigured:
-        # Symbols without explicit config get equal share of daily_start_capital
-        # (fallback behavior for mixed configuration)
-        fallback = settings.daily_start_capital / n_symbols
+        # Calculate remaining capital after explicit allocations
+        remaining_capital = settings.daily_start_capital - explicit_total
+        if remaining_capital < 0:
+            logger.warning(
+                f"[capital] Explicit allocations (${explicit_total:,.0f}) exceed "
+                f"daily_start_capital (${settings.daily_start_capital:,.0f}) — "
+                f"unconfigured symbols will get $0 allocation"
+            )
+            remaining_capital = 0.0
+
+        fallback = remaining_capital / len(unconfigured) if unconfigured else 0.0
         for sym in unconfigured:
             allocation[sym] = fallback
+
+        if remaining_capital > 0:
+            logger.info(
+                f"[capital] Allocating remaining ${remaining_capital:,.0f} "
+                f"equally to {len(unconfigured)} unconfigured symbol(s): "
+                f"{', '.join(unconfigured)} (${fallback:,.0f} each)"
+            )
 
     return allocation
 
