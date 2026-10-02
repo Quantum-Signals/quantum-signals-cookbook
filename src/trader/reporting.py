@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -569,3 +569,130 @@ def _report_minimal(broker: BrokerBase, perf: PerformanceTracker) -> None:
         logger.info("=" * 60)
     except Exception as exc:
         logger.warning(f"Reporting error: {exc}")
+
+
+def format_day_summary(
+    day: date,
+    perf: PerformanceTracker,
+    *,
+    intraday_pnl: float,
+    exit_pnl: float,
+    daily_start_capital: float,
+    snapshot: Optional[dict] = None,
+    intraday_closes: int = 0,
+) -> list[str]:
+    """Build the end-of-day summary lines (no I/O).
+
+    ``Trades`` / ``Closed`` is the number of positions that went flat — not
+    each order. Unrealized is $0 after flatten because nothing is left open;
+    the pre-close mark-to-market lives on *snapshot*.
+    """
+    snapshot = snapshot or {}
+    positions = list(snapshot.get("positions") or [])
+    pre_unreal = float(snapshot.get("unrealized_pnl") or 0.0)
+    nlv = snapshot.get("net_liquidation")
+    eod_closes = max(0, perf.total_trades - intraday_closes)
+    orders = perf.order_counts()
+    order_total = sum(orders.values())
+    sig_up = perf.signal_counts[Signal.UP]
+    sig_stable = perf.signal_counts[Signal.STABLE]
+    sig_down = perf.signal_counts[Signal.DOWN]
+    sig_total = sig_up + sig_stable + sig_down
+    total_pnl = perf.gross_pnl
+
+    lines = [
+        "=" * 60,
+        f"DAY SUMMARY  {day}",
+        "-" * 60,
+        "SIGNALS  (every UP/STABLE/DOWN received)",
+        f"  UP={sig_up}  STABLE={sig_stable}  DOWN={sig_down}  total={sig_total}",
+    ]
+    if perf.symbol_stats:
+        lines.append(f"  {'SYM':<8} {'UP':>6} {'STABLE':>8} {'DOWN':>6} {'TOTAL':>8}")
+        for sym, stats in sorted(perf.symbol_stats.items()):
+            up = stats.signal_counts[Signal.UP]
+            stable = stats.signal_counts[Signal.STABLE]
+            down = stats.signal_counts[Signal.DOWN]
+            lines.append(
+                f"  {sym:<8} {up:>6} {stable:>8} {down:>6} {up + stable + down:>8}"
+            )
+
+    lines.extend([
+        "",
+        "ORDERS  (fills sent to the broker — not the same as Closed)",
+        f"  BUY={orders['BUY']}  SELL={orders['SELL']}  "
+        f"SHORT={orders['SHORT']}  COVER={orders['COVER']}  total={order_total}",
+    ])
+    if perf.symbol_stats:
+        lines.append(f"  {'SYM':<8} {'BUY':>6} {'SELL':>6} {'SHORT':>6} {'COVER':>6}")
+        for sym, stats in sorted(perf.symbol_stats.items()):
+            tc = stats.trade_counts
+            lines.append(
+                f"  {sym:<8} {tc['BUY']:>6} {tc['SELL']:>6} "
+                f"{tc['SHORT']:>6} {tc['COVER']:>6}"
+            )
+
+    lines.extend([
+        "",
+        "CLOSED POSITIONS  (a 'trade' is a position going flat, not each order)",
+        f"  During session : {intraday_closes}",
+        f"  EOD flatten    : {eod_closes}",
+        f"  Total          : {perf.total_trades}   "
+        f"W={perf.winning_trades}  L={perf.losing_trades}  "
+        f"Win%={perf.win_rate:.1%}",
+    ])
+    if perf._trade_log:
+        for entry in perf._trade_log:
+            side = "LONG" if entry["direction"] == Signal.UP else "SHORT"
+            lines.append(
+                f"    {entry['symbol']:<8} {side:<5}  "
+                f"PnL={_format_currency(entry['pnl'], show_sign=True)}"
+            )
+    elif perf.total_trades == 0:
+        if order_total:
+            lines.append(
+                "    none — orders filled but no position went flat "
+                "(scaled in / leftover under 1 share)"
+            )
+        else:
+            lines.append("    none — no fills and nothing flattened")
+
+    in_session = (
+        f"  Realized in-session       : {_format_currency(intraday_pnl, show_sign=True)}"
+    )
+    if intraday_closes == 0 and intraday_pnl == 0.0:
+        in_session += "  (no position closed/flipped during the day)"
+
+    lines.extend([
+        "",
+        "PNL",
+        f"  Unrealized before flatten : {_format_currency(pre_unreal, show_sign=True)}",
+        "  Unrealized now            : $0.00  "
+        "(flat — we close everything at session end)",
+        in_session,
+        f"  Realized on flatten       : {_format_currency(exit_pnl, show_sign=True)}",
+        f"  Total day realized        : {_format_currency(total_pnl, show_sign=True)}",
+    ])
+    if daily_start_capital:
+        lines.append(
+            f"  Return on {_format_currency(daily_start_capital)}     : "
+            f"{total_pnl / daily_start_capital:+.2%}"
+        )
+    if nlv is not None:
+        lines.append(f"  NLV at flatten            : {_format_currency(float(nlv))}")
+
+    lines.extend(["", "POSITIONS AT FLATTEN"])
+    if positions:
+        for p in positions:
+            qty = float(p.get("qty", p.get("pos", 0)))
+            avg = float(p.get("avg_price", p.get("avg_cost", 0)))
+            label = "LONG" if qty >= 0 else "SHORT"
+            lines.append(
+                f"  {label:<5} {_format_qty(abs(qty)):>8} {p.get('symbol', '?')}  "
+                f"avg={avg:.2f}"
+            )
+    else:
+        lines.append("  (already flat — nothing to close)")
+
+    lines.append("=" * 60)
+    return lines

@@ -57,10 +57,17 @@ class TestPerformanceTracker:
         pt = PerformanceTracker()
         pt.record_close("ES", 500.0, Signal.UP)
         s = pt.summary()
-        assert "Trades=1" in s
+        assert "Closed=1" in s
         assert "Win%=100.0%" in s
         assert "W=1" in s
         assert "L=0" in s
+
+    def test_order_counts_sum_across_symbols(self):
+        pt = PerformanceTracker()
+        pt.record_trade("ES", "BUY", 2)
+        pt.record_trade("NQ", "SHORT", 1)
+        pt.record_trade("ES", "SELL", 0.5)
+        assert pt.order_counts() == {"BUY": 2, "SELL": 1, "SHORT": 1, "COVER": 0}
 
     def test_zero_pnl_counts_as_loss(self):
         pt = PerformanceTracker()

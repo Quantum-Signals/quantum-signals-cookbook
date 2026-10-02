@@ -13,7 +13,13 @@ from trader.access_control import run_startup_access_checks
 from trader.config import Settings, load_settings
 from trader.brokers import BrokerBase, create_broker
 from trader.models import PerformanceTracker
-from trader.reporting import report_once, ReportContext, ScheduleInfo, SizingInfo
+from trader.reporting import (
+    report_once,
+    format_day_summary,
+    ReportContext,
+    ScheduleInfo,
+    SizingInfo,
+)
 from trader.strategy.base import StrategyBase
 from trader.strategy.momentum import MomentumStrategy
 from trader.streaming import stream_signals_thread
@@ -452,23 +458,69 @@ def _get_sizing_info(
     return sizing_info
 
 
+def _snapshot_pre_close(broker: BrokerBase) -> dict:
+    """Capture open positions and broker PnL before EOD flatten."""
+    try:
+        acct = broker.get_account_summary()
+    except Exception as exc:
+        logger.warning(f"EOD snapshot: account summary failed: {exc}")
+        acct = {}
+    try:
+        positions = broker.get_positions_for_sync()
+    except Exception as exc:
+        logger.warning(f"EOD snapshot: positions failed: {exc}")
+        positions = []
+    return {
+        "positions": positions or [],
+        "unrealized_pnl": float(acct.get("unrealized_pnl") or 0.0),
+        "realized_pnl": float(acct.get("realized_pnl") or 0.0),
+        "net_liquidation": acct.get("net_liquidation"),
+    }
+
+
+def _flatten_and_summarize(
+    day: date,
+    broker: BrokerBase,
+    perf: PerformanceTracker,
+    settings: Settings,
+) -> tuple[float, float]:
+    """Snapshot, flatten if configured, log the day summary.
+
+    Returns ``(intraday_pnl, exit_pnl)``.
+    """
+    snapshot = _snapshot_pre_close(broker)
+    intraday_pnl = perf.gross_pnl
+    intraday_closes = perf.total_trades
+    exit_pnl = 0.0
+    if settings.close_on_exit:
+        exit_pnl = _close_all_positions(broker, settings, perf)
+    _log_day_summary(
+        day, perf, intraday_pnl, exit_pnl, settings,
+        snapshot=snapshot, intraday_closes=intraday_closes,
+    )
+    return intraday_pnl, exit_pnl
+
+
 def _log_day_summary(
     day: date,
     perf: PerformanceTracker,
     intraday_pnl_before_close: float,
     exit_pnl: float,
     settings: Settings,
+    snapshot: dict | None = None,
+    intraday_closes: int = 0,
 ) -> None:
-    cap = settings.daily_start_capital
-    total = perf.gross_pnl
-    logger.info("=" * 60)
-    logger.info(f"DAY SUMMARY  {day}")
-    logger.info(f"  In-session PnL (pre-close) : ${intraday_pnl_before_close:+,.2f}")
-    logger.info(f"  EOD flatten PnL            : ${exit_pnl:+,.2f}")
-    logger.info(f"  Total day PnL              : ${total:+,.2f}")
-    logger.info(f"  Return on ${cap:,.0f}        : {total / cap:+.2%}" if cap else "")
-    logger.info(f"  {perf.summary()}")
-    logger.info("=" * 60)
+    for line in format_day_summary(
+        day,
+        perf,
+        intraday_pnl=intraday_pnl_before_close,
+        exit_pnl=exit_pnl,
+        daily_start_capital=settings.daily_start_capital,
+        snapshot=snapshot,
+        intraday_closes=intraday_closes,
+    ):
+        if line:
+            logger.info(line)
 
 
 def _log_overall_summary(
@@ -626,12 +678,7 @@ def main() -> None:
                 eod_dt, tz, broker, strategy, perf, settings, stop_event, signal_queue
             )
 
-            intraday_pnl = perf.gross_pnl
-            exit_pnl = 0.0
-            if settings.close_on_exit:
-                exit_pnl = _close_all_positions(broker, settings, perf)
-
-            _log_day_summary(trading_day, perf, intraday_pnl, exit_pnl, settings)
+            _flatten_and_summarize(trading_day, broker, perf, settings)
 
             cumulative_pnl += perf.gross_pnl
             cumulative_trades += perf.total_trades
@@ -659,20 +706,12 @@ def main() -> None:
         # regardless of whether *perf* has any closed trades. Open positions
         # accumulated this run (or carried over from a previous run) must not
         # be left at the broker.
-        intraday_pnl = perf.gross_pnl
-        exit_pnl = 0.0
-        if settings.close_on_exit:
-            exit_pnl = _close_all_positions(broker, settings, perf)
-
-        if perf.gross_pnl != 0.0 or perf.total_trades > 0 or exit_pnl != 0.0:
-            _log_day_summary(
-                datetime.now(tz).date(), perf, intraday_pnl, exit_pnl, settings
-            )
-            cumulative_pnl += perf.gross_pnl
-            cumulative_trades += perf.total_trades
-            cumulative_wins += perf.winning_trades
-            cumulative_losses += perf.losing_trades
-            days_completed += 1
+        _flatten_and_summarize(datetime.now(tz).date(), broker, perf, settings)
+        cumulative_pnl += perf.gross_pnl
+        cumulative_trades += perf.total_trades
+        cumulative_wins += perf.winning_trades
+        cumulative_losses += perf.losing_trades
+        days_completed += 1
     finally:
         stop_event.set()
         _log_overall_summary(

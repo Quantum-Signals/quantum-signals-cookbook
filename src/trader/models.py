@@ -125,9 +125,17 @@ class PerformanceTracker:
             stats.reset()
         self.decisions_executed = 0
 
+    def order_counts(self) -> dict[str, int]:
+        """Sum BUY/SELL/SHORT/COVER counts across symbols."""
+        totals = {"BUY": 0, "SELL": 0, "SHORT": 0, "COVER": 0}
+        for stats in self.symbol_stats.values():
+            for action, count in stats.trade_counts.items():
+                totals[action] = totals.get(action, 0) + count
+        return totals
+
     def summary(self) -> str:
         return (
-            f"Trades={self.total_trades} | "
+            f"Closed={self.total_trades} | "
             f"Win%={self.win_rate:.1%} | "
             f"Gross PnL=${self.gross_pnl:+,.2f} | "
             f"W={self.winning_trades} L={self.losing_trades}"
