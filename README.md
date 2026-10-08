@@ -212,7 +212,9 @@ CL (→ USO), GC (→ GLD), SI (→ SLV), NG (→ UNG), and AAPL. See
 `qs_trader_symbols.INSTRUMENTS` for the full alias list.
 
 Alpaca supports **equities and ETFs only** — futures names are mapped to correlated
-ETFs. See [docs/brokers.md](docs/brokers.md).
+ETFs. TMGM maps those same names onto MetaTrader 5 symbols (`ES` → `US500`,
+`NQ` → `NAS100`, `GC` → `XAUUSD`, and the rest in `tmgm_symbol_map()`). See
+[docs/brokers.md](docs/brokers.md).
 
 ---
 
@@ -233,6 +235,14 @@ The bot has **two layers** of safety, applied in this order:
 |---|---|
 | `true` | Real orders to Alpaca **paper** account |
 | `false` | Real orders to Alpaca **live** account — **real money** |
+
+### TMGM (`TRADER_BROKER=tmgm`)
+
+Requires Windows, the TMGM MetaTrader 5 terminal logged in, and the toolbar
+**Algo Trading** button on. The `MetaTrader5` package is not installed in the
+Linux Docker image. `TMGM_ALLOW_LIVE=false` (the default) refuses a live account.
+Orders are in lots. Leave this on the demo server until sizing against the CFD
+contract sizes has been checked; the app's futures multipliers are a different scale.
 
 ### Recommended progression
 

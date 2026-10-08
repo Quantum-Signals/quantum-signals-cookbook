@@ -16,6 +16,7 @@ from .catalog import (
     parse_allowed_symbols,
     position_symbol_to_canonical,
     simulated_symbol_map,
+    tmgm_symbol_map,
     trading_targets,
 )
 
@@ -35,5 +36,6 @@ __all__ = [
     "parse_allowed_symbols",
     "position_symbol_to_canonical",
     "simulated_symbol_map",
+    "tmgm_symbol_map",
     "trading_targets",
 ]

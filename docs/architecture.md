@@ -172,7 +172,8 @@ live-trader/                # uv workspace root (the app)
 ├── src/brokers/            # broker packages (uv workspace members)
 │   ├── core/               # qs-trader-broker-core: BrokerBase, OrderResult, SimulatedBroker
 │   │   └── tests/          #   package's own tests (SimulatedBroker)
-│   └── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
+│   ├── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
+│   └── tmgm/               # qs-trader-broker-tmgm (MetaTrader5, Windows-only wheel)
 ├── tests/                  # app-level tests (config, strategies, models, access control)
 └── scripts/                # QS smoke test, multiday sim
 ```
@@ -204,6 +205,7 @@ Broker-specific quirks worth knowing here:
 | Class | Notes |
 |-------|-------|
 | `AlpacaBroker` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
+| `TmgmBroker` | Contract = MT5 symbol string. Talks to a local Windows MetaTrader 5 terminal (`MetaTrader5` is not installed on Linux or in the Docker image). Refuses a live account unless `TMGM_ALLOW_LIVE=true`. Closes hedging positions by ticket |
 | `SimulatedBroker` | Jittered seed prices (`SIM_PRICE_JITTER`, `0` = deterministic); no external broker |
 
 ### Strategies (`src/trader/strategy/`)
@@ -250,6 +252,8 @@ QuantumSignals emits objects consumed by `handle_signal(signal)`.
 | QQQ | QQQ |
 
 Defined in `qs_trader_symbols`. Each broker builds its tradable map from that catalog (see [brokers.md § Symbol maps](brokers.md#symbol-maps)).
+
+TMGM (`TRADER_BROKER=tmgm`) uses the same QS names with the broker's MetaTrader 5 symbols: `ES` → `US500`, `NQ` → `NAS100`, `YM` → `US30`, `RTY` → `US2000`, `CL` → `XTIUSD`, `GC` → `XAUUSD`, `SI` → `XAGUSD`, `AAPL` → `AAPL.NAS`. Natural gas has no symbol on the `TradeMaxGlobal-Demo` server those names were checked against. Order quantity is lots, and the futures point values in `contract_multipliers` are not the CFD contract sizes.
 
 Set `TRADER_ALLOWED_SYMBOLS` using **any alias** for an instrument (`ES`, `SPY`, or `S&P500` all select the same product). Empty = allow the full catalog.
 
@@ -520,6 +524,7 @@ uv run pytest -v
 | `src/brokers/core/tests/test_simulated_broker.py` | `SimulatedBroker` (co-located with the core broker package) |
 | `tests/test_strategy.py` | `MomentumStrategy` + `FakeSignal` |
 | `src/symbols/tests/test_catalog.py` | QS symbol catalog |
+| `src/brokers/tmgm/tests/test_tmgm_broker.py` | `TmgmBroker` against a fake MetaTrader 5 client |
 
 No live broker or QS API in CI-style unit tests.
 

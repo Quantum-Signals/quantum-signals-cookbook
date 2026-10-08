@@ -15,7 +15,8 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # are broker-neutral PnL math (used by the app's EOD flatten) and stay here.
 
 # Point-value per contract, used for end-of-day PnL in app.py. Futures carry a
-# contract multiplier; equities/ETFs are 1:1.
+# contract multiplier; equities/ETFs are 1:1. These are exchange futures point
+# values, not TMGM CFD contract sizes.
 _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
     "ES": 50.0, "NQ": 20.0, "YM": 5.0, "RTY": 50.0,
     "MES": 5.0, "MNQ": 2.0, "MYM": 0.5, "M2K": 5.0,

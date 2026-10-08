@@ -5,6 +5,7 @@ from qs_trader_symbols import (
     active_canonical_symbols,
     alpaca_symbol_map,
     canonical_symbols,
+    tmgm_symbol_map,
     canonicalize,
     is_symbol_allowed,
     parse_allowed_symbols,
@@ -57,6 +58,31 @@ def test_alpaca_map_covers_index_aliases():
     assert m["Nasdaq100"] == "QQQ"
     assert m["Russell2000"] == "IWM"
     assert m["AAPL"] == "AAPL"
+
+
+def test_tmgm_map_routes_confirmed_market_watch_names():
+    m = tmgm_symbol_map()
+    assert m["ES"] == m["SPY"] == m["S&P500"] == m["MES"] == "US500"
+    assert m["NQ"] == m["QQQ"] == m["Nasdaq100"] == "NAS100"
+    assert m["YM"] == m["DIA"] == "US30"
+    assert m["RTY"] == m["IWM"] == "US2000"
+    assert m["CL"] == m["USO"] == "XTIUSD"
+    assert m["GC"] == m["GLD"] == "XAUUSD"
+    assert m["SI"] == m["SLV"] == "XAGUSD"
+    assert m["AAPL"] == "AAPL.NAS"
+    assert "NG" not in m
+    assert "UNG" not in m
+
+
+def test_tmgm_symbols_map_back_to_canonical():
+    assert position_symbol_to_canonical("US500") == "ES"
+    assert position_symbol_to_canonical("NAS100") == "NQ"
+    assert position_symbol_to_canonical("US30") == "YM"
+    assert position_symbol_to_canonical("US2000") == "RTY"
+    assert position_symbol_to_canonical("XTIUSD") == "CL"
+    assert position_symbol_to_canonical("XAUUSD") == "GC"
+    assert position_symbol_to_canonical("XAGUSD") == "SI"
+    assert position_symbol_to_canonical("AAPL.NAS") == "AAPL"
 
 
 def test_silver_and_gas_aliases():

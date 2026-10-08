@@ -15,6 +15,7 @@ members = [
     "live-trader",
     "qs-trader-broker-alpaca",
     "qs-trader-broker-core",
+    "qs-trader-broker-tmgm",
     "qs-trader-symbols",
 ]
 
@@ -444,6 +445,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "qs-trader-broker-alpaca" },
     { name = "qs-trader-broker-core" },
+    { name = "qs-trader-broker-tmgm" },
     { name = "qs-trader-symbols" },
     { name = "quantumsignals-client" },
 ]
@@ -461,6 +463,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "qs-trader-broker-alpaca", editable = "src/brokers/alpaca" },
     { name = "qs-trader-broker-core", editable = "src/brokers/core" },
+    { name = "qs-trader-broker-tmgm", editable = "src/brokers/tmgm" },
     { name = "qs-trader-symbols", editable = "src/symbols" },
     { name = "quantumsignals-client", specifier = ">=0.9.0" },
 ]
@@ -494,6 +497,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c7/74/97e72a36efd4ae2bccb3463284300f8953f199b5ffbc04cbbb0ec78f74b1/matplotlib_inline-0.2.1.tar.gz", hash = "sha256:e1ee949c340d771fc39e241ea75683deb94762c8fa5f2927ec57c83c4dffa9fe", size = 8110, upload-time = "2025-10-23T09:00:22.126Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/af/33/ee4519fa02ed11a94aef9559552f3b17bb863f2ecfe1a35dc7f548cde231/matplotlib_inline-0.2.1-py3-none-any.whl", hash = "sha256:d56ce5156ba6085e00a9d54fead6ed29a9c47e215cd1bba2e976ef39f5710a76", size = 9516, upload-time = "2025-10-23T09:00:20.675Z" },
+]
+
+[[package]]
+name = "metatrader5"
+version = "5.0.6231"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", marker = "sys_platform == 'win32'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/ed/525a69afbc050f5b19342a6ddada4f086e2aa9ef63b987bef5d723f29586/metatrader5-5.0.6231-cp312-cp312-win_amd64.whl", hash = "sha256:b94b1f8f52087ae36dfac5f352a96f5d04fe308704d9515f82cf5d1470bc31d4", size = 47968, upload-time = "2026-09-27T12:22:35.219Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/f2/c310381487da4ea67ee6e71bd8244857fe9c276ea37db0c70b5fb280fe4a/metatrader5-5.0.6231-cp313-cp313-win_amd64.whl", hash = "sha256:3a8c8349ce691a4ef05e314afc034ad82f4dbb19415efc7442af5ea075d5e797", size = 47964, upload-time = "2026-09-27T12:22:36.136Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/7e/5f1ca5f564c7d7552c9706c976de05b594b61d82ae09a189c69662230fbc/metatrader5-5.0.6231-cp314-cp314-win_amd64.whl", hash = "sha256:9a63f026072479298be0d0cbc1a878d4f659aff2e18280a4128843dbb425841b", size = 49531, upload-time = "2026-09-27T12:22:37.03Z" },
 ]
 
 [[package]]
@@ -1010,6 +1026,27 @@ dependencies = [
 requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "qs-trader-symbols", editable = "src/symbols" },
+]
+
+[[package]]
+name = "qs-trader-broker-tmgm"
+version = "0.1.0"
+source = { editable = "src/brokers/tmgm" }
+dependencies = [
+    { name = "loguru" },
+    { name = "metatrader5", marker = "sys_platform == 'win32'" },
+    { name = "pydantic-settings" },
+    { name = "qs-trader-broker-core" },
+    { name = "qs-trader-symbols" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "metatrader5", marker = "sys_platform == 'win32'", specifier = ">=5.0.6231" },
+    { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "qs-trader-broker-core", editable = "src/brokers/core" },
     { name = "qs-trader-symbols", editable = "src/symbols" },
 ]
 

@@ -24,14 +24,18 @@ class QSInstrument:
     alpaca_ticker: str | None = None
     """Tradable Alpaca equity/ETF; ``None`` when this broker cannot trade it."""
 
+    tmgm_symbol: str | None = None
+    """Tradable TMGM MetaTrader 5 symbol; ``None`` when this server has no listing."""
+
     position_symbols: frozenset[str] = frozenset()
-    """Extra broker position keys (ETF tickers, micro roots) for sync lookups."""
+    """Extra broker position keys (ETF tickers, MT5 symbols, micro roots) for sync lookups."""
 
 
 def _inst(
     canonical: str,
     *aliases: str,
     alpaca_ticker: str | None = None,
+    tmgm_symbol: str | None = None,
     position_symbols: frozenset[str] | None = None,
 ) -> QSInstrument:
     all_names = frozenset({canonical, *aliases})
@@ -39,11 +43,14 @@ def _inst(
     extras: set[str] = set(pos)
     if alpaca_ticker:
         extras.add(alpaca_ticker)
+    if tmgm_symbol:
+        extras.add(tmgm_symbol)
     extras |= all_names
     return QSInstrument(
         canonical=canonical,
         aliases=all_names,
         alpaca_ticker=alpaca_ticker,
+        tmgm_symbol=tmgm_symbol,
         position_symbols=frozenset(extras),
     )
 
@@ -57,6 +64,7 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "SPY",
         "MES",
         alpaca_ticker="SPY",
+        tmgm_symbol="US500",
     ),
     _inst(
         "NQ",
@@ -64,6 +72,7 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "QQQ",
         "MNQ",
         alpaca_ticker="QQQ",
+        tmgm_symbol="NAS100",
     ),
     _inst(
         "YM",
@@ -72,6 +81,7 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "DIA",
         "MYM",
         alpaca_ticker="DIA",
+        tmgm_symbol="US30",
     ),
     _inst(
         "RTY",
@@ -80,24 +90,28 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "IWM",
         "M2K",
         alpaca_ticker="IWM",
+        tmgm_symbol="US2000",
     ),
     _inst(
         "CL",
         "Crude Oil",
         "USO",
         alpaca_ticker="USO",
+        tmgm_symbol="XTIUSD",
     ),
     _inst(
         "GC",
         "Gold",
         "GLD",
         alpaca_ticker="GLD",
+        tmgm_symbol="XAUUSD",
     ),
     _inst(
         "SI",
         "Silver",
         "SLV",
         alpaca_ticker="SLV",
+        tmgm_symbol="XAGUSD",
     ),
     _inst(
         "NG",
@@ -109,6 +123,7 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
     _inst(
         "AAPL",
         alpaca_ticker="AAPL",
+        tmgm_symbol="AAPL.NAS",
     ),
 )
 
@@ -224,6 +239,22 @@ def format_alias_list(canonical: str, *, limit: int = 8) -> str:
 def position_symbol_to_canonical(broker_symbol: str) -> str | None:
     """Map a broker position key (ETF ticker, micro root, …) back to canonical."""
     return _POSITION_TO_CANONICAL.get(broker_symbol)
+
+
+def tmgm_symbol_map() -> dict[str, str]:
+    """Build TMGM ``DEFAULT_SYMBOL_MAP`` (QS alias → MetaTrader 5 symbol).
+
+    Instruments with no listing on the broker (currently natural gas) are omitted.
+    Confirmed against Market Watch on ``TradeMaxGlobal-Demo`` (October 2026):
+    index CFDs, ``XTIUSD``, metals, and ``AAPL.NAS``. ``USOIL`` is not that server's oil symbol.
+    """
+    mapping: dict[str, str] = {}
+    for instrument in INSTRUMENTS:
+        if not instrument.tmgm_symbol:
+            continue
+        for alias in instrument.aliases:
+            mapping[alias] = instrument.tmgm_symbol
+    return mapping
 
 
 def alpaca_symbol_map() -> dict[str, str]:

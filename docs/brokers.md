@@ -14,6 +14,7 @@ owning its broker SDK:
 | `qs-trader-symbols` | `qs_trader_symbols` | QS symbol catalog, alias normalization, broker map helpers | — |
 | `qs-trader-broker-core` | `qs_trader_broker_core` | `BrokerBase`, `OrderResult`, `SimulatedBroker` | — |
 | `qs-trader-broker-alpaca` | `qs_trader_broker_alpaca` | `AlpacaBroker`, `AlpacaSettings` (`ALPACA_*`) | `alpaca-py` |
+| `qs-trader-broker-tmgm` | `qs_trader_broker_tmgm` | `TmgmBroker`, `TmgmSettings` (`TMGM_*`) | `MetaTrader5` (Windows only) |
 
 ## Discovery & selection
 
@@ -33,6 +34,7 @@ one:
 ```
 TRADER_BROKER=simulated   → simulated broker (SimulatedBroker, in core; the default)
 TRADER_BROKER=alpaca      → AlpacaBroker      (REST, ETFs, fractional longs)
+TRADER_BROKER=tmgm        → TmgmBroker        (local MetaTrader 5, TMGM CFDs)
 ```
 
 Installing a package that registers a broker under this group makes it
@@ -54,7 +56,8 @@ config. The app's `Settings` only decides *which* broker to run
 trader (app) ──→ qs-trader-symbols
      │                ↑
      ├──→ qs-trader-broker-core ──→ qs-trader-symbols
-     └──→ qs-trader-broker-alpaca ──→ qs-trader-broker-core
+     ├──→ qs-trader-broker-alpaca ──→ qs-trader-broker-core
+     └──→ qs-trader-broker-tmgm ──→ qs-trader-broker-core
 ```
 
 ## The `BrokerBase` interface
@@ -88,6 +91,7 @@ that catalog:
 |-----|----------|---------|
 | `INSTRUMENTS` / `canonicalize()` | `qs_trader_symbols` | QS alias → canonical key (`ES`, `NQ`, …) |
 | `AlpacaBroker.DEFAULT_SYMBOL_MAP` | built via `alpaca_symbol_map()` | QS alias → tradable ETF/stock ticker |
+| `TmgmBroker.DEFAULT_SYMBOL_MAP` | built via `tmgm_symbol_map()` | QS alias → TMGM MetaTrader 5 symbol (`ES` → `US500`). Natural gas is omitted |
 | `SimulatedBroker.DEFAULT_SYMBOL_MAP` | built via `simulated_symbol_map()` | Dry-run contract shapes; `.DEFAULT_PRICES` seeds quotes |
 
 Each broker accepts an optional `symbol_map` (and the simulator, `sim_prices`)

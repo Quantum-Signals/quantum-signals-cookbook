@@ -1,0 +1,52 @@
+"""Numeric values from the official MetaTrader 5 Python API.
+
+Copied here so this package can talk to a fake client on Linux CI, where the
+Windows-only ``MetaTrader5`` wheel is not installed. Values match package 5.0.6231.
+``SYMBOL_FILLING_*`` are the MQL5 bitmask flags on ``symbol_info.filling_mode``;
+the Python package does not export those names. ``filling_mode == 2`` (IOC) is
+what TradeMaxGlobal-Demo reported for the mapped CFDs.
+"""
+
+from __future__ import annotations
+
+ORDER_TYPE_BUY = 0
+ORDER_TYPE_SELL = 1
+ORDER_TYPE_BUY_LIMIT = 2
+ORDER_TYPE_SELL_LIMIT = 3
+
+TRADE_ACTION_DEAL = 1
+TRADE_ACTION_PENDING = 5
+
+ORDER_TIME_GTC = 0
+ORDER_FILLING_FOK = 0
+ORDER_FILLING_IOC = 1
+ORDER_FILLING_RETURN = 2
+
+# Bitmask on symbol_info.filling_mode (MQL5 SYMBOL_FILLING_*).
+SYMBOL_FILLING_FOK = 1
+SYMBOL_FILLING_IOC = 2
+
+POSITION_TYPE_BUY = 0
+POSITION_TYPE_SELL = 1
+
+ACCOUNT_TRADE_MODE_DEMO = 0
+ACCOUNT_TRADE_MODE_CONTEST = 1
+ACCOUNT_TRADE_MODE_REAL = 2
+
+ACCOUNT_MARGIN_MODE_RETAIL_NETTING = 0
+ACCOUNT_MARGIN_MODE_RETAIL_HEDGING = 2
+
+SYMBOL_TRADE_MODE_DISABLED = 0
+
+TRADE_RETCODE_REQUOTE = 10004
+TRADE_RETCODE_PLACED = 10008
+TRADE_RETCODE_DONE = 10009
+TRADE_RETCODE_DONE_PARTIAL = 10010
+TRADE_RETCODE_PRICE_CHANGED = 10020
+TRADE_RETCODE_PRICE_OFF = 10021
+
+FILLED_RETCODES = frozenset({TRADE_RETCODE_DONE, TRADE_RETCODE_DONE_PARTIAL})
+ACCEPTED_RETCODES = FILLED_RETCODES | {TRADE_RETCODE_PLACED}
+RETRY_RETCODES = frozenset(
+    {TRADE_RETCODE_REQUOTE, TRADE_RETCODE_PRICE_CHANGED, TRADE_RETCODE_PRICE_OFF}
+)

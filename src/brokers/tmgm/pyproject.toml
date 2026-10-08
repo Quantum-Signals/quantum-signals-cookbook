@@ -1,0 +1,29 @@
+[project]
+name = "qs-trader-broker-tmgm"
+version = "0.1.0"
+description = "TMGM broker (local MetaTrader 5 terminal) for the QuantumSignals live trader"
+requires-python = ">=3.12"
+dependencies = [
+    "qs-trader-broker-core",
+    "qs-trader-symbols",
+    "loguru>=0.7.3",
+    "pydantic-settings>=2.0",
+    # Official MetaQuotes wheel is Windows-only. Linux CI and the Docker image
+    # install this package without it; connect() imports it on the machine that
+    # runs the terminal. Tests inject a fake client and never import it.
+    "MetaTrader5>=5.0.6231; sys_platform == 'win32'",
+]
+
+[project.entry-points.qs_trader_brokers]
+tmgm = "qs_trader_broker_tmgm:TmgmBroker"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qs_trader_broker_tmgm"]
+
+[tool.uv.sources]
+qs-trader-broker-core = { workspace = true }
+qs-trader-symbols = { workspace = true }
