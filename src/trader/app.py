@@ -552,6 +552,11 @@ def _log_overall_summary(
 
 
 def main() -> None:
+    # Broker packages read their own env vars (ALPACA_*, TMGM_*). Docker injects
+    # .env into the process; a local run needs the same values loaded first.
+    from dotenv import load_dotenv
+
+    load_dotenv()
     run_id = _setup_logging()
     settings = load_settings()
     tz = _get_tz(settings)

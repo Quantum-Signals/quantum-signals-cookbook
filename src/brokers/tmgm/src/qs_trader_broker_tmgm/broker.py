@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import time
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional
 
@@ -46,12 +48,15 @@ def align_volume(qty: float, step: float, minimum: float) -> Optional[float]:
     return float(aligned)
 
 
-def _order_filling(symbol_filling_mode: int) -> int:
+def _order_filling(symbol_filling_mode: int | None) -> int:
     """Map ``symbol_info.filling_mode`` onto ``ORDER_FILLING_*``.
 
     TradeMaxGlobal-Demo reports ``2`` (IOC) for the mapped CFDs, and that filling
-    mode is what a live demo deal accepted.
+    mode is what a demo deal accepted. The macOS bridge does not forward
+    ``filling_mode``, so a missing value uses IOC.
     """
+    if symbol_filling_mode is None:
+        return ORDER_FILLING_IOC
     if symbol_filling_mode & SYMBOL_FILLING_IOC:
         return ORDER_FILLING_IOC
     if symbol_filling_mode & SYMBOL_FILLING_FOK:
@@ -59,12 +64,60 @@ def _order_filling(symbol_filling_mode: int) -> int:
     return ORDER_FILLING_RETURN
 
 
+def load_mt5_module():
+    """Import the MetaTrader 5 client for this operating system.
+
+    Windows uses the official ``MetaTrader5`` wheel. macOS uses ``mt5_mac``,
+    which runs that same wheel inside the Wine prefix shipped with
+    ``MetaTrader 5.app``.
+    """
+    if sys.platform == "darwin":
+        try:
+            import mt5_mac as mt5
+        except ImportError as exc:
+            raise RuntimeError(
+                "TMGM on macOS needs MetaTrader 5.app and the mt5-mac package. "
+                "Install the terminal from https://www.metatrader5.com/en/download, "
+                "then run uv sync."
+            ) from exc
+        return mt5
+    try:
+        import MetaTrader5 as mt5
+    except ImportError as exc:
+        raise RuntimeError(
+            "The official MetaTrader5 package is only published for Windows. "
+            "On macOS, install MetaTrader 5.app; connect() uses mt5-mac there."
+        ) from exc
+    return mt5
+
+
+def _algo_trading_enabled(client: object, account: object) -> bool:
+    """Return whether the terminal will accept algorithmic orders.
+
+    The Windows package exposes this on ``terminal_info().trade_allowed`` (the
+    Algo Trading toolbar button). The macOS bridge does not, so fall back to
+    ``account_info().trade_expert`` when that flag is present.
+    """
+    terminal_info = getattr(client, "terminal_info", None)
+    if callable(terminal_info):
+        terminal = terminal_info()
+        if terminal is not None and not getattr(terminal, "trade_allowed", True):
+            return False
+        return True
+    expert = getattr(account, "trade_expert", None)
+    if expert is None:
+        return True
+    return bool(expert)
+
+
 class TmgmBroker(BrokerBase):
     """Broker that sends orders through a local MetaTrader 5 terminal logged into TMGM.
 
     TMGM has no REST API. This process talks to the official ``MetaTrader5`` Python
-    package, which only runs on Windows and only while the desktop terminal is open.
-    The ``contract`` object is the MT5 symbol string (``US500``, ``XAUUSD``, …).
+    package. On Windows that package is imported directly. On macOS, ``mt5-mac``
+    runs it inside the Wine prefix bundled with MetaTrader 5.app. The terminal
+    has to be installed either way. The ``contract`` object is the MT5 symbol
+    string (``US500``, ``XAUUSD``, …).
 
     A hedging account (the TradeMaxGlobal demo is one) does not net an opposite
     deal into the open position. Reducing orders therefore close the position
@@ -96,15 +149,21 @@ class TmgmBroker(BrokerBase):
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
+        loaded_here = False
         if self._client is None:
-            import MetaTrader5 as mt5
-
-            self._client = mt5
+            self._client = load_mt5_module()
+            loaded_here = True
 
         client = self._client
         kwargs: dict[str, object] = {}
-        if self._settings.terminal_path:
-            kwargs["path"] = self._settings.terminal_path
+        terminal_path = self._settings.terminal_path
+        # On macOS the bridge only attaches when given the terminal executable.
+        # An empty path makes initialize() report "MetaTrader 5 x64 not found"
+        # even when MetaTrader 5.app is already running.
+        if loaded_here and not terminal_path and sys.platform == "darwin":
+            terminal_path = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+        if terminal_path:
+            kwargs["path"] = terminal_path
         if self._settings.login:
             kwargs["login"] = self._settings.login
             kwargs["password"] = self._settings.password
@@ -124,8 +183,7 @@ class TmgmBroker(BrokerBase):
                 "Refusing to trade. Set TMGM_ALLOW_LIVE=true only when that is intentional."
             )
 
-        terminal = client.terminal_info()
-        if terminal is not None and not getattr(terminal, "trade_allowed", True):
+        if not _algo_trading_enabled(client, account):
             client.shutdown()
             raise RuntimeError(
                 "MetaTrader 5 algorithmic trading is off. "
@@ -205,6 +263,11 @@ class TmgmBroker(BrokerBase):
         symbol = str(contract)
         client.symbol_select(symbol, True)
         tick = client.symbol_info_tick(symbol)
+        # The first tick after adding a symbol to Market Watch is often 0/0
+        # until the terminal receives a quote.
+        if tick is None or float(tick.bid) <= 0 or float(tick.ask) <= 0:
+            time.sleep(1.0)
+            tick = client.symbol_info_tick(symbol)
         if tick is None:
             logger.warning(f"[TMGM] No tick for {symbol}: {client.last_error()}")
             return None
@@ -384,7 +447,7 @@ class TmgmBroker(BrokerBase):
                 "magic": self._settings.magic,
                 "comment": "qs-tmgm-close" if position_ticket is not None else "qs-tmgm",
                 "type_time": ORDER_TIME_GTC,
-                "type_filling": _order_filling(int(getattr(info, "filling_mode", 0))),
+                "type_filling": _order_filling(getattr(info, "filling_mode", None)),
             }
             if position_ticket is not None:
                 request["position"] = position_ticket
