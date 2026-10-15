@@ -12,9 +12,6 @@ dependencies = [
     # install this package without it; connect() imports it on the machine that
     # runs the terminal. Tests inject a fake client and never import it.
     "MetaTrader5>=5.0.6231; sys_platform == 'win32'",
-    # macOS has no MetaTrader5 wheel. mt5-mac drives the official package inside
-    # the Wine runtime bundled with MetaTrader 5.app.
-    "mt5-mac>=0.3.0; sys_platform == 'darwin'",
 ]
 
 [project.entry-points.qs_trader_brokers]

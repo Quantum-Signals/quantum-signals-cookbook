@@ -557,15 +557,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mt5-mac"
-version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/53/c7/fc0999839486d3909ca0eeb9dfd0f8c05b206da07d1e1e09d4ef564b9cb5/mt5_mac-0.3.0.tar.gz", hash = "sha256:d42cf1525afab2a86c0456c78be963a1348a3b907353d608c125d4d90dea04ac", size = 20327, upload-time = "2026-07-15T12:25:22.795Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/35/0b/f240869ddd69d7074edf2914430d130f0232a10a1147b38c79e075bd80b8/mt5_mac-0.3.0-py3-none-any.whl", hash = "sha256:3fa2e9c036a62fc4c1d523d12edb057e97eb6034202433aaa45d35b7c645b9b3", size = 17915, upload-time = "2026-07-15T12:25:21.412Z" },
-]
-
-[[package]]
 name = "nest-asyncio"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1045,7 +1036,6 @@ source = { editable = "src/brokers/tmgm" }
 dependencies = [
     { name = "loguru" },
     { name = "metatrader5", marker = "sys_platform == 'win32'" },
-    { name = "mt5-mac", marker = "sys_platform == 'darwin'" },
     { name = "pydantic-settings" },
     { name = "qs-trader-broker-core" },
     { name = "qs-trader-symbols" },
@@ -1055,7 +1045,6 @@ dependencies = [
 requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "metatrader5", marker = "sys_platform == 'win32'", specifier = ">=5.0.6231" },
-    { name = "mt5-mac", marker = "sys_platform == 'darwin'", specifier = ">=0.3.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "qs-trader-broker-core", editable = "src/brokers/core" },
     { name = "qs-trader-symbols", editable = "src/symbols" },

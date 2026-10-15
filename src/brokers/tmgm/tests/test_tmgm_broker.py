@@ -175,22 +175,6 @@ def test_connect_refuses_when_algo_trading_is_off():
     assert client.shutdown_calls == 1
 
 
-def test_connect_refuses_when_mac_bridge_reports_trade_expert_off():
-    class _Bridge(FakeMT5):
-        terminal_info = None
-
-        def account_info(self):
-            info = super().account_info()
-            info.trade_expert = False
-            return info
-
-    client = _Bridge()
-    broker = TmgmBroker(_settings(), client=client)
-    with pytest.raises(RuntimeError, match="Algo Trading"):
-        broker.connect()
-    assert client.shutdown_calls == 1
-
-
 def test_connect_passes_login_when_configured():
     client = FakeMT5()
     TmgmBroker(
@@ -205,20 +189,6 @@ def test_connect_passes_login_when_configured():
 def test_last_price_is_the_bid_ask_mid():
     broker = _broker(FakeMT5())
     assert broker.get_last_price("US500") == pytest.approx(7780.15)
-
-
-def test_missing_filling_mode_uses_ioc():
-    client = FakeMT5()
-    client.symbols["US500"] = SimpleNamespace(
-        name="US500",
-        volume_min=0.01,
-        volume_step=0.01,
-        trade_mode=4,
-    )
-    broker = _broker(client)
-    result = broker.place_order("US500", "BUY", 0.01, position_intent="open")
-    assert result is not None
-    assert client.orders[0]["type_filling"] == ORDER_FILLING_IOC
 
 
 def test_open_buy_is_a_market_deal_without_a_position_ticket():

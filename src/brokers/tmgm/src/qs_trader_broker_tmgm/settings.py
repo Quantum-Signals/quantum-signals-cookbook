@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,14 +16,6 @@ class TmgmSettings(BaseSettings):
     login: int = 0
     password: str = ""
     server: str = ""
-
-    @field_validator("login", mode="before")
-    @classmethod
-    def _blank_login_means_current_session(cls, value: object) -> object:
-        # An empty TMGM_LOGIN in .env means "attach to the terminal already open".
-        if value is None or (isinstance(value, str) and value.strip() == ""):
-            return 0
-        return value
     terminal_path: str = ""
     allow_live: bool = False
     deviation: int = 100
