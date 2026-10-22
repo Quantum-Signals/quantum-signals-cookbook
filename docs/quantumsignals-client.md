@@ -9,7 +9,7 @@ Get started with the QuantumSignals API using the official Python client (`quant
 ## Prerequisites
 
 - Python 3.12+ (3.10+ supported by the client; this repo requires 3.12)
-- A QuantumSignals API key from [quantumsignals.io](https://quantumsignals.io) or your administrator
+- A QuantumSignals API key from [quantumsignals.ai](https://quantumsignals.ai) or your administrator
 
 ## Installation
 

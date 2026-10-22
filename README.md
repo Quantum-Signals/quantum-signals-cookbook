@@ -1,6 +1,6 @@
 # QuantumSignals Live Trader
 
-An algorithmic trading bot that streams real-time signals from [QuantumSignals](https://quantumsignals.io) and executes trades automatically through a pluggable broker (**Alpaca** included).
+An algorithmic trading bot that streams real-time signals from [QuantumSignals](https://quantumsignals.ai) and executes trades automatically through a pluggable broker (**Alpaca** included).
 
 **Developer documentation:** [docs/architecture.md](docs/architecture.md): module map, position-sizing logic, local development.
 
@@ -11,7 +11,7 @@ An algorithmic trading bot that streams real-time signals from [QuantumSignals](
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) installed on your machine
-- A **QuantumSignals** API key — get one at [quantumsignals.io](https://quantumsignals.io)
+- A **QuantumSignals** API key — get one at [quantumsignals.ai](https://quantumsignals.ai)
 - For Alpaca: **Alpaca** [account](https://alpaca.markets) and API keys
 
 ---
