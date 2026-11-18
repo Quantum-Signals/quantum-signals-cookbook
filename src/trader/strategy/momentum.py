@@ -393,11 +393,13 @@ class MomentumStrategy(StrategyBase):
             canon,
             self._settings.daily_start_capital / max(len(self._target_daily_notional), 1),
         )
+        # Futures point value (MES=5, …); 1 for equities/ETFs.
+        multiplier = self._settings.contract_multipliers.get(pos_sym, 1.0)
         slice_qty = _compute_order_qty(
             self._interval_minutes, price,
             target_notional,
             self._use_fractional,
-            self._settings.contract_multipliers.get(pos_sym, 1.0),
+            multiplier,
         )
         signed_slice = slice_qty if sig == Signal.UP else -slice_qty
 
@@ -428,7 +430,7 @@ class MomentumStrategy(StrategyBase):
                 f"(reserve={_fmt_signed_qty(new_reserve)}, "
                 f"net stays at {_fmt_signed_qty(current)})"
             )
-            self._settle(canon, price, current, avg_entry, current)
+            self._settle(canon, price, current, avg_entry, current, multiplier)
             return
 
         new_net = current
@@ -452,7 +454,6 @@ class MomentumStrategy(StrategyBase):
                 )
                 break
             signed_qty = leg.qty if leg.action == "BUY" else -leg.qty
-            multiplier = self._settings.contract_multipliers.get(pos_sym, 1.0)
 
             # Record trade action: map (action, intent) → (BUY, SELL, SHORT, COVER)
             trade_action = _map_trade_action(leg.action, leg.intent)
@@ -467,7 +468,7 @@ class MomentumStrategy(StrategyBase):
             new_net += signed_qty
             prev_intent = leg.intent
 
-        self._settle(canon, price, current, avg_entry, new_net)
+        self._settle(canon, price, current, avg_entry, new_net, multiplier)
 
         if abs(new_reserve) > 1e-9:
             logger.info(f"  -> (reserve: {_fmt_signed_qty(new_reserve)})")
@@ -497,11 +498,15 @@ class MomentumStrategy(StrategyBase):
         prev_net: float,
         avg_entry: Optional[float],
         new_net: float,
+        multiplier: float = 1.0,
     ) -> None:
         """Update PnL and cached state after this tick's fills.
 
         ``prev_net`` is the broker position before the tick's orders and
         ``new_net`` the position implied by the fills that succeeded.
+        ``multiplier`` is the contract point value, so a futures close books
+        dollars (1 MES point = $5), matching the EOD flatten in ``app.py``.
+        ``_total_cost`` stays in price units; only the booked PnL is scaled.
         """
         goes_flat = abs(prev_net) > _DUST_QTY and abs(new_net) <= _DUST_QTY
         crosses_zero = (
@@ -515,7 +520,7 @@ class MomentumStrategy(StrategyBase):
                 known = self._net_qty.get(sym, 0.0)
                 cost = self._total_cost.get(sym, 0.0)
                 entry = cost / known if abs(known) > _BROKER_EPS else price
-            pnl = (price - entry) * prev_net
+            pnl = (price - entry) * prev_net * multiplier
             direction = Signal.UP if prev_net > 0 else Signal.DOWN
             self.perf.record_close(sym, pnl, direction)
             logger.info(
