@@ -1,3 +1,4 @@
+import pytest
 from dataclasses import dataclass
 
 from qs_trader_broker_core import SimContract, SimulatedBroker, SimulatedSettings
@@ -793,3 +794,47 @@ class TestSettingsValidation:
                 qs_api_key="test",
                 daily_start_capital=-1000,
             )
+
+
+class TestFuturesPnlMultiplier:
+    """Strategy-booked PnL must use the contract point value, like the EOD flatten."""
+
+    def _close_one(self, contract_symbol: str, multiplier: float, entry: float, exit_: float):
+        # Capital chosen so one 5-min slice at the exit price is exactly 1 unit.
+        settings = _make_settings(
+            allowed_symbols=["ES"],
+            daily_start_capital=78 * exit_ * multiplier,
+            symbol_capital={},
+            execution_interval_minutes=5,
+        )
+        spec = {"symbol": contract_symbol, "secType": "FUT", "exchange": "CME", "currency": "USD"}
+        broker = SimulatedBroker(
+            SimulatedSettings(price_jitter=0.0),
+            symbol_map={"ES": spec},
+            sim_prices={contract_symbol: entry},
+        )
+        broker.connect()
+        broker.place_order(broker.resolve_contract("ES"), "BUY", 1)  # long 1 @ entry
+        perf = PerformanceTracker()
+        strategy = MomentumStrategy(broker, perf, settings)
+        strategy.sync_positions()
+
+        broker._prices[contract_symbol] = exit_
+        _fire(strategy, "ES", Signal.DOWN)
+        assert broker.get_positions_for_sync() == []
+        return perf
+
+    def test_micro_future_close_books_point_value(self):
+        perf = self._close_one("MES", 5.0, 6800.0, 6804.0)
+        assert perf.total_trades == 1
+        assert perf.gross_pnl == pytest.approx(4.0 * 5.0)  # 4 points × $5
+
+    def test_etf_close_is_unscaled(self):
+        perf = self._close_one("SPY", 1.0, 500.0, 504.0)
+        assert perf.total_trades == 1
+        assert perf.gross_pnl == pytest.approx(4.0)
+
+    def test_settle_scales_crossing_through_zero(self):
+        strategy, _, perf = TestMomentumStrategy()._make_strategy()
+        strategy._settle("ES", 6790.0, 2.0, 6800.0, -1.0, multiplier=5.0)
+        assert perf.gross_pnl == pytest.approx(-10.0 * 2.0 * 5.0)
