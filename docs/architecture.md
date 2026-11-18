@@ -172,7 +172,8 @@ live-trader/                # uv workspace root (the app)
 ├── src/brokers/            # broker packages (uv workspace members)
 │   ├── core/               # qs-trader-broker-core: BrokerBase, OrderResult, SimulatedBroker
 │   │   └── tests/          #   package's own tests (SimulatedBroker)
-│   └── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
+│   ├── alpaca/             # qs-trader-broker-alpaca (deps: alpaca-py)
+│   └── ironbeam/           # qs-trader-broker-ironbeam (REST v3 via requests)
 ├── tests/                  # app-level tests (config, strategies, models, access control)
 └── scripts/                # QS smoke test, multiday sim
 ```
@@ -204,6 +205,7 @@ Broker-specific quirks worth knowing here:
 | Class | Notes |
 |-------|-------|
 | `AlpacaBroker` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
+| `IronbeamBroker` | Contract = `IronbeamContract(exch_sym="XCME:MES.Z26", root="MES")`. Front month = earliest listed contract more than `IRONBEAM_ROLL_DAYS` from expiry (via `securityDefinitions`), cached per day; a held contract is traded until flat. Whole contracts, netting account, `FAST_ORDER` MARKET/DAY, fill polled via `GET /order/{id}`. Never calls `/auth/logout` (it revokes every session of the login) |
 | `SimulatedBroker` | Jittered seed prices (`SIM_PRICE_JITTER`, `0` = deterministic); no external broker |
 
 ### Strategies (`src/trader/strategy/`)
@@ -250,6 +252,8 @@ QuantumSignals emits objects consumed by `handle_signal(signal)`.
 | QQQ | QQQ |
 
 Defined in `qs_trader_symbols`. Each broker builds its tradable map from that catalog (see [brokers.md § Symbol maps](brokers.md#symbol-maps)).
+
+Ironbeam (`TRADER_BROKER=ironbeam`) trades the futures themselves: `ES` → `MES`, `NQ` → `MNQ`, `YM` → `MYM`, `RTY` → `M2K`, `CL` → `MCL`, `GC` → `MGC`, `SI` → `SIL`, `NG` → `NG` (no micro), with full-size roots when `IRONBEAM_USE_MICROS=false`. Positions are keyed by root, so `contract_multipliers` (MES = 5, MCL = 100, …) apply directly. AAPL has no futures root and is skipped.
 
 Set `TRADER_ALLOWED_SYMBOLS` using **any alias** for an instrument (`ES`, `SPY`, or `S&P500` all select the same product). Empty = allow the full catalog.
 
@@ -520,6 +524,7 @@ uv run pytest -v
 | `src/brokers/core/tests/test_simulated_broker.py` | `SimulatedBroker` (co-located with the core broker package) |
 | `tests/test_strategy.py` | `MomentumStrategy` + `FakeSignal` |
 | `src/symbols/tests/test_catalog.py` | QS symbol catalog |
+| `src/brokers/ironbeam/tests/test_ironbeam_broker.py` | `IronbeamBroker` against a fake Ironbeam REST session |
 
 No live broker or QS API in CI-style unit tests.
 

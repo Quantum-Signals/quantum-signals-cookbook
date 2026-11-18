@@ -1,0 +1,26 @@
+[project]
+name = "qs-trader-broker-ironbeam"
+version = "0.1.0"
+description = "Ironbeam broker (REST API v3, CME Group futures) for the QuantumSignals live trader"
+requires-python = ">=3.12"
+dependencies = [
+    "qs-trader-broker-core",
+    "qs-trader-symbols",
+    "loguru>=0.7.3",
+    "pydantic-settings>=2.0",
+    "requests>=2.31",
+]
+
+[project.entry-points.qs_trader_brokers]
+ironbeam = "qs_trader_broker_ironbeam:IronbeamBroker"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qs_trader_broker_ironbeam"]
+
+[tool.uv.sources]
+qs-trader-broker-core = { workspace = true }
+qs-trader-symbols = { workspace = true }

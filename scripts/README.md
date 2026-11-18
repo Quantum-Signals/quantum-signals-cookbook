@@ -7,11 +7,13 @@ key; `smoke_multiday_supervisor.py` is fully offline.
 | Script | What it does | Requires |
 |---|---|---|
 | `smoke_qs_connection.py` | Validates your API key, prints the signal catalog, and streams live signals | `QUANTUMSIGNALS_API_KEY` in `.env` |
+| `smoke_ironbeam.py` | Logs into Ironbeam, lists accounts, resolves front months, prints quotes, balances and positions. Read-only: places no orders | `IRONBEAM_*` in `.env` |
 | `smoke_multiday_supervisor.py` | Drives the multi-day supervisor offline with a fake clock and stubbed QS stream (no API key needed) | Nothing — fully offline |
 
 ## Running
 
 ```bash
 uv run python scripts/smoke_qs_connection.py
+uv run python scripts/smoke_ironbeam.py
 uv run python scripts/smoke_multiday_supervisor.py --days 3
 ```

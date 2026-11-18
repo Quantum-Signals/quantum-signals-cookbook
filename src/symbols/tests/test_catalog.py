@@ -6,6 +6,8 @@ from qs_trader_symbols import (
     alpaca_symbol_map,
     canonical_symbols,
     canonicalize,
+    ironbeam_root_exchanges,
+    ironbeam_symbol_map,
     is_symbol_allowed,
     parse_allowed_symbols,
     position_symbol_to_canonical,
@@ -90,3 +92,29 @@ def test_allowed_etf_or_future_name_accepts_other_aliases(instrument):
     assert allowed is not None
     for alias in instrument.aliases:
         assert is_symbol_allowed(alias, allowed)
+
+
+def test_ironbeam_map_uses_micros_by_default():
+    m = ironbeam_symbol_map()
+    assert m["ES"] == m["SPY"] == m["S&P500"] == "MES"
+    assert m["NQ"] == "MNQ"
+    assert m["YM"] == "MYM"
+    assert m["RTY"] == "M2K"
+    assert m["GC"] == "MGC"
+    assert m["SI"] == "SIL"
+    assert m["CL"] == "MCL"
+    assert m["NG"] == "NG"  # no micro: falls back to full size
+    assert "AAPL" not in m
+
+
+def test_ironbeam_map_full_size():
+    m = ironbeam_symbol_map(use_micros=False)
+    assert m["ES"] == "ES" and m["Nasdaq100"] == "NQ" and m["Gold"] == "GC"
+
+
+def test_ironbeam_roots_map_back_to_canonical():
+    for root, canon in {"MES": "ES", "MCL": "CL", "MGC": "GC", "SIL": "SI", "NG": "NG"}.items():
+        assert position_symbol_to_canonical(root) == canon
+    ex = ironbeam_root_exchanges()
+    assert ex["MYM"] == ex["YM"] == "XCBT"
+    assert ex["MCL"] == "XNYM" and ex["SIL"] == "XCEC" and ex["MES"] == "XCME"

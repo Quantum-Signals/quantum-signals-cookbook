@@ -20,6 +20,7 @@ _DEFAULT_CONTRACT_MULTIPLIERS: dict[str, float] = {
     "ES": 50.0, "NQ": 20.0, "YM": 5.0, "RTY": 50.0,
     "MES": 5.0, "MNQ": 2.0, "MYM": 0.5, "M2K": 5.0,
     "CL": 1000.0, "GC": 100.0, "SI": 5000.0, "NG": 10000.0,
+    "MCL": 100.0, "MGC": 10.0, "SIL": 1000.0,
     "AAPL": 1.0, "SPY": 1.0, "QQQ": 1.0,
     "DIA": 1.0, "IWM": 1.0, "USO": 1.0, "GLD": 1.0, "SLV": 1.0, "UNG": 1.0,
 }

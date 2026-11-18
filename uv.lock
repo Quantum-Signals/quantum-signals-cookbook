@@ -15,6 +15,7 @@ members = [
     "live-trader",
     "qs-trader-broker-alpaca",
     "qs-trader-broker-core",
+    "qs-trader-broker-ironbeam",
     "qs-trader-symbols",
 ]
 
@@ -444,6 +445,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "qs-trader-broker-alpaca" },
     { name = "qs-trader-broker-core" },
+    { name = "qs-trader-broker-ironbeam" },
     { name = "qs-trader-symbols" },
     { name = "quantumsignals-client" },
 ]
@@ -461,6 +463,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "qs-trader-broker-alpaca", editable = "src/brokers/alpaca" },
     { name = "qs-trader-broker-core", editable = "src/brokers/core" },
+    { name = "qs-trader-broker-ironbeam", editable = "src/brokers/ironbeam" },
     { name = "qs-trader-symbols", editable = "src/symbols" },
     { name = "quantumsignals-client", specifier = ">=0.9.0" },
 ]
@@ -1011,6 +1014,27 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "qs-trader-symbols", editable = "src/symbols" },
+]
+
+[[package]]
+name = "qs-trader-broker-ironbeam"
+version = "0.1.0"
+source = { editable = "src/brokers/ironbeam" }
+dependencies = [
+    { name = "loguru" },
+    { name = "pydantic-settings" },
+    { name = "qs-trader-broker-core" },
+    { name = "qs-trader-symbols" },
+    { name = "requests" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "qs-trader-broker-core", editable = "src/brokers/core" },
+    { name = "qs-trader-symbols", editable = "src/symbols" },
+    { name = "requests", specifier = ">=2.31" },
 ]
 
 [[package]]

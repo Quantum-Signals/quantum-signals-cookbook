@@ -3,7 +3,7 @@
 Every name the QS stream may emit for an instrument lives here once. Strategies
 normalize incoming ``signal.symbol`` values to a *canonical* key (futures root,
 e.g. ``ES``) for internal state. Each broker builds its own tradable map from
-this catalog (Alpaca tickers, simulated contracts).
+this catalog (Alpaca tickers, Ironbeam futures roots, simulated contracts).
 """
 
 from __future__ import annotations
@@ -24,6 +24,15 @@ class QSInstrument:
     alpaca_ticker: str | None = None
     """Tradable Alpaca equity/ETF; ``None`` when this broker cannot trade it."""
 
+    ironbeam_root: str | None = None
+    """Full-size CME Group futures root on Ironbeam (``ES``); ``None`` when not a future."""
+
+    ironbeam_micro_root: str | None = None
+    """Micro futures root on Ironbeam (``MES``); ``None`` when there is no micro."""
+
+    ironbeam_exchange: str = "XCME"
+    """Preferred Ironbeam exchange code for both roots (``XCME``, ``XCBT``, ``XNYM``, ``XCEC``)."""
+
     position_symbols: frozenset[str] = frozenset()
     """Extra broker position keys (ETF tickers, micro roots) for sync lookups."""
 
@@ -32,6 +41,9 @@ def _inst(
     canonical: str,
     *aliases: str,
     alpaca_ticker: str | None = None,
+    ironbeam_root: str | None = None,
+    ironbeam_micro_root: str | None = None,
+    ironbeam_exchange: str = "XCME",
     position_symbols: frozenset[str] | None = None,
 ) -> QSInstrument:
     all_names = frozenset({canonical, *aliases})
@@ -39,11 +51,17 @@ def _inst(
     extras: set[str] = set(pos)
     if alpaca_ticker:
         extras.add(alpaca_ticker)
+    for root in (ironbeam_root, ironbeam_micro_root):
+        if root:
+            extras.add(root)
     extras |= all_names
     return QSInstrument(
         canonical=canonical,
         aliases=all_names,
         alpaca_ticker=alpaca_ticker,
+        ironbeam_root=ironbeam_root,
+        ironbeam_micro_root=ironbeam_micro_root,
+        ironbeam_exchange=ironbeam_exchange,
         position_symbols=frozenset(extras),
     )
 
@@ -57,6 +75,8 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "SPY",
         "MES",
         alpaca_ticker="SPY",
+        ironbeam_root="ES",
+        ironbeam_micro_root="MES",
     ),
     _inst(
         "NQ",
@@ -64,6 +84,8 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "QQQ",
         "MNQ",
         alpaca_ticker="QQQ",
+        ironbeam_root="NQ",
+        ironbeam_micro_root="MNQ",
     ),
     _inst(
         "YM",
@@ -72,6 +94,9 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "DIA",
         "MYM",
         alpaca_ticker="DIA",
+        ironbeam_root="YM",
+        ironbeam_micro_root="MYM",
+        ironbeam_exchange="XCBT",
     ),
     _inst(
         "RTY",
@@ -80,24 +105,35 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "IWM",
         "M2K",
         alpaca_ticker="IWM",
+        ironbeam_root="RTY",
+        ironbeam_micro_root="M2K",
     ),
     _inst(
         "CL",
         "Crude Oil",
         "USO",
         alpaca_ticker="USO",
+        ironbeam_root="CL",
+        ironbeam_micro_root="MCL",
+        ironbeam_exchange="XNYM",
     ),
     _inst(
         "GC",
         "Gold",
         "GLD",
         alpaca_ticker="GLD",
+        ironbeam_root="GC",
+        ironbeam_micro_root="MGC",
+        ironbeam_exchange="XCEC",
     ),
     _inst(
         "SI",
         "Silver",
         "SLV",
         alpaca_ticker="SLV",
+        ironbeam_root="SI",
+        ironbeam_micro_root="SIL",
+        ironbeam_exchange="XCEC",
     ),
     _inst(
         "NG",
@@ -105,6 +141,8 @@ INSTRUMENTS: tuple[QSInstrument, ...] = (
         "Gas",
         "UNG",
         alpaca_ticker="UNG",
+        ironbeam_root="NG",
+        ironbeam_exchange="XNYM",
     ),
     _inst(
         "AAPL",
@@ -224,6 +262,37 @@ def format_alias_list(canonical: str, *, limit: int = 8) -> str:
 def position_symbol_to_canonical(broker_symbol: str) -> str | None:
     """Map a broker position key (ETF ticker, micro root, …) back to canonical."""
     return _POSITION_TO_CANONICAL.get(broker_symbol)
+
+
+def ironbeam_symbol_map(*, use_micros: bool = True) -> dict[str, str]:
+    """Build Ironbeam ``DEFAULT_SYMBOL_MAP`` (QS alias → futures product root).
+
+    With *use_micros* the micro contract is used where one exists (``ES`` →
+    ``MES``), falling back to the full-size root (natural gas has no micro
+    here). Instruments that are not futures (``AAPL``) are omitted, so the
+    broker skips them. The contract month is resolved by the broker at runtime.
+    """
+    mapping: dict[str, str] = {}
+    for instrument in INSTRUMENTS:
+        root = (
+            instrument.ironbeam_micro_root if use_micros and instrument.ironbeam_micro_root
+            else instrument.ironbeam_root
+        )
+        if not root:
+            continue
+        for alias in instrument.aliases:
+            mapping[alias] = root
+    return mapping
+
+
+def ironbeam_root_exchanges() -> dict[str, str]:
+    """Preferred Ironbeam exchange code per futures root (full-size and micro)."""
+    exchanges: dict[str, str] = {}
+    for instrument in INSTRUMENTS:
+        for root in (instrument.ironbeam_root, instrument.ironbeam_micro_root):
+            if root:
+                exchanges[root] = instrument.ironbeam_exchange
+    return exchanges
 
 
 def alpaca_symbol_map() -> dict[str, str]:

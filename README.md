@@ -212,7 +212,9 @@ CL (→ USO), GC (→ GLD), SI (→ SLV), NG (→ UNG), and AAPL. See
 `qs_trader_symbols.INSTRUMENTS` for the full alias list.
 
 Alpaca supports **equities and ETFs only** — futures names are mapped to correlated
-ETFs. See [docs/brokers.md](docs/brokers.md).
+ETFs. Ironbeam trades the CME Group futures themselves, micros by default
+(`ES` → `MES`, front month resolved daily; see `ironbeam_symbol_map()`). See
+[docs/brokers.md](docs/brokers.md).
 
 ---
 
@@ -233,6 +235,16 @@ The bot has **two layers** of safety, applied in this order:
 |---|---|
 | `true` | Real orders to Alpaca **paper** account |
 | `false` | Real orders to Alpaca **live** account — **real money** |
+
+### Ironbeam (`TRADER_BROKER=ironbeam`)
+
+REST API v3, CME Group futures in whole contracts. Set `IRONBEAM_API_KEY`
+(plus `IRONBEAM_USERNAME` / `IRONBEAM_PASSWORD` for tenant keys). Live and
+simulated accounts are separate Ironbeam deployments with separate keys: which
+one you trade is decided by the key and `IRONBEAM_BASE_URL`, not by a flag here.
+Check it with `uv run python scripts/smoke_ironbeam.py` (read-only) first.
+Orders are at least one contract per slice, so a small `TRADER_DAILY_START_CAPITAL`
+still trades one micro contract each interval.
 
 ### Recommended progression
 
