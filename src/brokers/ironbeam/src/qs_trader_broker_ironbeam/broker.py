@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Callable, Optional
 
+import requests
 from loguru import logger
 
 from qs_trader_broker_core.base import BrokerBase, OrderResult
 from qs_trader_symbols import canonicalize, ironbeam_root_exchanges, ironbeam_symbol_map
 
+from .diagnostics import Diagnostics, OrderCheck
 from .settings import IronbeamSettings
 
 # CME Group month codes, January → December.
@@ -21,6 +23,10 @@ _LOOKAHEAD_MONTHS = 13
 _DEFS_BATCH = 10
 _POLL_INTERVAL_S = 0.5
 _MAX_RETRY_AFTER_S = 10.0
+# Pause before retrying a read that timed out or lost its connection.
+_NETWORK_RETRY_WAIT_S = 2.0
+# An empty position list is re-read this often while the account shows margin in use.
+_EMPTY_POSITIONS_READS = 3
 
 _FAILED_STATUSES = frozenset({"REJECTED", "CANCELED", "EXPIRED", "STOPPED", "SUSPENDED", "DONE_FOR_DAY"})
 
@@ -83,9 +89,10 @@ class IronbeamBroker(BrokerBase):
     """Broker backed by the Ironbeam REST API v3 (CME Group futures).
 
     Each QuantumSignals instrument maps to a futures product root (micro by
-    default: ``ES`` → ``MES``). The contract month is resolved at runtime: the
-    earliest listed contract that is more than ``IRONBEAM_ROLL_DAYS`` from
-    expiry, cached for the day. While the account holds a position in a root,
+    default: ``ES`` → ``MES``). The contract month is resolved at runtime: of
+    the listed contracts more than ``IRONBEAM_ROLL_DAYS`` from expiry, the one
+    with the most open interest (the earliest if quotes are unavailable),
+    cached for the day. While the account holds a position in a root,
     that held contract is traded instead, so a roll never leaves a stray leg in
     the old month (the EOD flatten closes it, and the next day picks the new
     front month).
@@ -127,6 +134,9 @@ class IronbeamBroker(BrokerBase):
         self._front: dict[str, tuple[date, Optional[IronbeamContract]]] = {}
         # root → contract currently held, refreshed on every positions read.
         self._held: dict[str, IronbeamContract] = {}
+        # exch_sym → signed contracts: last positions read plus our own fills since.
+        self._known_positions: Optional[dict[str, float]] = None
+        self._diag: Optional[Diagnostics] = Diagnostics(self) if self._settings.diagnostics else None
 
     # ------------------------------------------------------------------
     # HTTP
@@ -140,28 +150,41 @@ class IronbeamBroker(BrokerBase):
         params: Optional[dict] = None,
         body: Optional[dict] = None,
         auth: bool = True,
+        timeout: Optional[float] = None,
+        network_retry: bool = True,
         _retried: bool = False,
     ) -> dict:
         """Call ``/v3{path}`` and return the JSON body, raising ``IronbeamError`` on failure.
 
-        Retries once, and only where Ironbeam says nothing was done: a 401 after
-        logging in again (expired token), and a 429 / 503 that carries
-        ``Retry-After``. A 5xx without ``Retry-After`` or a 504 is never
-        retried, because an order may have been placed.
+        Retries once, and only where it is safe: a 401 after logging in again
+        (expired token), a 429 / 503 that carries ``Retry-After`` (Ironbeam did
+        nothing), and a timeout or dropped connection on a ``GET`` (read-only).
+        A 5xx without ``Retry-After``, a 504, or a timeout on a ``POST`` is never
+        retried, because an order may have been placed. ``network_retry=False``
+        skips the timeout retry, for callers that retry themselves.
         """
         if self._session is None:
             raise RuntimeError("Ironbeam broker is not connected")
         headers = {"Accept": "application/json"}
         if auth:
             headers["Authorization"] = f"Bearer {self._token}"
-        resp = self._session.request(
-            method,
-            f"{self._base}/v3{path}",
-            params=params,
-            json=body,
-            headers=headers,
-            timeout=self._settings.http_timeout_s,
-        )
+        try:
+            resp = self._session.request(
+                method,
+                f"{self._base}/v3{path}",
+                params=params,
+                json=body,
+                headers=headers,
+                timeout=timeout if timeout is not None else self._settings.http_timeout_s,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if method != "GET" or _retried or not network_retry:
+                raise
+            logger.warning(f"[Ironbeam] GET {path} failed ({type(exc).__name__}) — retrying once")
+            self._sleep(_NETWORK_RETRY_WAIT_S)
+            return self._request(
+                method, path, params=params, body=body, auth=auth, timeout=timeout, _retried=True
+            )
         resp_headers = getattr(resp, "headers", None) or {}
         fresh = resp_headers.get("X-Auth-Token")
         if fresh and auth:
@@ -172,7 +195,9 @@ class IronbeamBroker(BrokerBase):
             if status == 401 and auth:
                 logger.warning(f"[Ironbeam] {method} {path} returned 401 — logging in again")
                 self._login()
-                return self._request(method, path, params=params, body=body, auth=auth, _retried=True)
+                return self._request(
+                method, path, params=params, body=body, auth=auth, timeout=timeout, _retried=True
+            )
             retry_after = resp_headers.get("Retry-After")
             if status in (429, 503) and retry_after is not None:
                 try:
@@ -181,7 +206,9 @@ class IronbeamBroker(BrokerBase):
                     wait = 1.0
                 logger.warning(f"[Ironbeam] {method} {path} returned {status} — retrying in {wait:g}s")
                 self._sleep(wait)
-                return self._request(method, path, params=params, body=body, auth=auth, _retried=True)
+                return self._request(
+                method, path, params=params, body=body, auth=auth, timeout=timeout, _retried=True
+            )
 
         try:
             payload = resp.json()
@@ -240,6 +267,8 @@ class IronbeamBroker(BrokerBase):
             f"[Ironbeam] Trading {'micro' if self._settings.use_micros else 'full-size'} "
             "futures in whole contracts"
         )
+        if self._diag is not None:
+            self._diag.account_check()
 
     def _pick_account(self, accounts: list[str], trader_id: str) -> str:
         wanted = self._settings.account_id.strip()
@@ -332,7 +361,7 @@ class IronbeamBroker(BrokerBase):
 
         preferred = self._exchanges.get(root)
         cutoff_ms = (self._clock() + self._settings.roll_days * 86_400) * 1000
-        best: Optional[tuple[tuple, dict]] = None
+        listed: list[tuple[tuple, str]] = []
         for d in definitions:
             exch_sym = str(d.get("exchSym") or "")
             if not exch_sym or d.get("legs") or d.get("securityType", "FUT") != "FUT":
@@ -349,11 +378,45 @@ class IronbeamBroker(BrokerBase):
                 int(d.get("maturityMonth") or 99),
                 float(expiry) if expiry is not None else float("inf"),
             )
-            if best is None or key < best[0]:
-                best = (key, d)
-        if best is None:
+            listed.append((key, exch_sym))
+        if not listed:
             return None
-        return IronbeamContract(exch_sym=str(best[1]["exchSym"]), root=root)
+        listed.sort()
+        # Keep one exchange: the preferred one when it lists the product.
+        exchange_rank = listed[0][0][0]
+        months = [sym for key, sym in listed if key[0] == exchange_rank][:_DEFS_BATCH]
+        return IronbeamContract(exch_sym=self._most_traded(months), root=root)
+
+    def _most_traded(self, months: list[str]) -> str:
+        """Pick the contract with the highest open interest from *months* (chronological).
+
+        The earliest listed month is not always the traded one: metals and
+        energy list every month, and the nearest can be a thin delivery month
+        (silver's November with a few lots a day while December trades tens of
+        thousands). Open interest marks the active month. Falls back to the
+        earliest month when quotes are unavailable.
+        """
+        if len(months) == 1:
+            return months[0]
+        try:
+            payload = self._request("GET", "/market/quotes", params={"symbols": ",".join(months)})
+        except IronbeamError as exc:
+            logger.warning(f"[Ironbeam] Open interest lookup failed ({exc}); using {months[0]}")
+            return months[0]
+        open_interest = {
+            str(q.get("exchSym")): float(q.get("openInterest") or 0)
+            for q in payload.get("quotes") or []
+        }
+        best = max(months, key=lambda sym: (open_interest.get(sym, 0.0), -months.index(sym)))
+        if open_interest.get(best, 0.0) <= 0:
+            return months[0]
+        if best != months[0]:
+            logger.info(
+                f"[Ironbeam] {best} has the most open interest "
+                f"({open_interest[best]:,.0f}); skipping {months[0]} "
+                f"({open_interest.get(months[0], 0.0):,.0f})"
+            )
+        return best
 
     def startup_entitlement_warnings(self, canonical_symbols: list[str]) -> list[str]:
         warnings: list[str] = []
@@ -362,6 +425,9 @@ class IronbeamBroker(BrokerBase):
                 warnings.append(f"{canon} is not a futures product on Ironbeam")
             elif self.resolve_contract(canon) is None:
                 warnings.append(f"{canon}: no listed {self._symbol_map[canon]} contract on Ironbeam")
+        if self._diag is not None:
+            contracts = [c for c in map(self.resolve_contract, canonical_symbols) if c is not None]
+            warnings.extend(self._diag.contract_check([c.exch_sym for c in contracts]))
         return warnings
 
     # ------------------------------------------------------------------
@@ -423,6 +489,7 @@ class IronbeamBroker(BrokerBase):
         }
         if not market:
             leg["limitPrice"] = float(price)
+        check = self._diag.before_order(contract, side, quantity) if self._diag is not None else None
         cl_ord_id = f"qs-{uuid.uuid4().hex[:16]}"
         body = {"orderType": "FAST_ORDER", "clOrdId": cl_ord_id, "legs": [leg]}
 
@@ -430,6 +497,7 @@ class IronbeamBroker(BrokerBase):
             payload = self._request("POST", "/order/place", body=body)
         except IronbeamError as exc:
             if exc.status in (500, 502, 503, 504):
+                self._known_positions = None  # it may have filled
                 logger.error(
                     f"[Ironbeam] {side} {quantity} {contract.exch_sym}: {exc}. The order may still "
                     f"have been placed (clOrdId={cl_ord_id}); the next interval re-plans from positions."
@@ -438,6 +506,7 @@ class IronbeamBroker(BrokerBase):
                 logger.error(f"[Ironbeam] {side} {quantity} {contract.exch_sym} rejected: {exc}")
             return None
         except Exception as exc:  # network failure: the order may or may not be in
+            self._known_positions = None
             logger.error(
                 f"[Ironbeam] {side} {quantity} {contract.exch_sym} request failed ({exc}); "
                 f"it may have been placed (clOrdId={cl_ord_id})"
@@ -446,23 +515,31 @@ class IronbeamBroker(BrokerBase):
 
         order_id = str(payload.get("orderId") or "")
         if not order_id:
+            self._known_positions = None
             logger.error(f"[Ironbeam] Place answered without an orderId: {payload}")
             return None
         logger.info(
             f"[Ironbeam] {side} {quantity}x {contract.exch_sym} {leg['kind']} accepted  "
             f"id={order_id}  clOrdId={cl_ord_id}"
         )
-        return self._await_fill(order_id, contract, side, quantity)
+        return self._await_fill(order_id, contract, side, quantity, check)
 
     def _await_fill(
-        self, order_id: str, contract: IronbeamContract, side: str, quantity: int
+        self,
+        order_id: str,
+        contract: IronbeamContract,
+        side: str,
+        quantity: int,
+        check: Optional[OrderCheck] = None,
     ) -> Optional[OrderResult]:
         deadline = self._clock() + self._settings.fill_timeout_s
         leg: dict = {}
+        order: dict = {}
         while True:
             try:
                 payload = self._request("GET", f"/order/{order_id}")
-                legs = (payload.get("order") or {}).get("legs") or []
+                order = payload.get("order") or {}
+                legs = order.get("legs") or []
                 leg = next((x for x in legs if x.get("role") == "MAIN"), legs[0] if legs else {})
             except IronbeamError as exc:
                 if exc.status != 404:  # 404 right after placing just means "not reported yet"
@@ -474,15 +551,24 @@ class IronbeamBroker(BrokerBase):
             filled = float(leg.get("filledQuantity") or 0)
             avg = leg.get("avgFillPrice")
             if status == "FILLED":
+                self._book_fill(contract, side, filled or quantity)
+                if self._diag is not None and check is not None:
+                    self._diag.after_order(check, order_id, True, avg)
                 return _result(order_id, contract, side, filled or quantity, avg, "filled", leg)
             if status in _FAILED_STATUSES:
-                reason = leg.get("statusMsg") or "no reason given"
+                if status == "REJECTED" and not _given_reason(leg, order):
+                    leg, order = self._reread_rejection(order_id, leg, order)
+                reason = _reject_reason(leg, order)
                 if filled > 0:
+                    self._book_fill(contract, side, filled)
                     logger.warning(
                         f"[Ironbeam] Order {order_id} {status} after filling {filled:g} of {quantity}: {reason}"
                     )
                     return _result(order_id, contract, side, filled, avg, "partially_filled", leg)
                 logger.error(f"[Ironbeam] Order {order_id} {status}: {reason}")
+                self._log_margin_snapshot()
+                if self._diag is not None and check is not None and status == "REJECTED":
+                    self._diag.after_order(check, order_id, False, reason=_given_reason(leg, order))
                 return None
             if self._clock() >= deadline:
                 break
@@ -493,6 +579,8 @@ class IronbeamBroker(BrokerBase):
             f"[Ironbeam] Order {order_id} not filled after {self._settings.fill_timeout_s:g}s "
             f"(status={leg.get('status', 'unknown')}, filled={filled:g}/{quantity}) — still working"
         )
+        # The order is still working, so what it will fill is not known.
+        self._known_positions = None
         if filled > 0:
             return _result(order_id, contract, side, filled, leg.get("avgFillPrice"), "partially_filled", leg)
         return OrderResult(
@@ -505,6 +593,24 @@ class IronbeamBroker(BrokerBase):
             raw=leg or None,
         )
 
+    def _reread_rejection(self, order_id: str, leg: dict, order: dict) -> tuple[dict, dict]:
+        """Read a rejected order once more: its ``statusMsg`` can arrive a moment later."""
+        self._sleep(1.0)
+        try:
+            again = self._request("GET", f"/order/{order_id}", timeout=5.0, network_retry=False).get("order") or {}
+            legs = again.get("legs") or []
+            again_leg = next((x for x in legs if x.get("role") == "MAIN"), legs[0] if legs else {})
+        except Exception as exc:
+            logger.warning(f"[Ironbeam] Order {order_id}: could not re-read the rejection ({exc})")
+            return leg, order
+        return (again_leg, again) if again_leg else (leg, order)
+
+    def _book_fill(self, contract: IronbeamContract, side: str, filled: float) -> None:
+        if self._known_positions is not None:
+            signed = filled if side == "BUY" else -filled
+            held = self._known_positions.get(contract.exch_sym, 0.0) + signed
+            self._known_positions[contract.exch_sym] = held
+
     # ------------------------------------------------------------------
     # Account & positions
     # ------------------------------------------------------------------
@@ -515,6 +621,29 @@ class IronbeamBroker(BrokerBase):
         if not balances:
             raise RuntimeError(f"Ironbeam returned no balance for account {self._account_id}")
         return next((b for b in balances if b.get("currencyCode") == "USD"), balances[0])
+
+    def _log_margin_snapshot(self) -> None:
+        """After a rejection, log the account's margin so a margin refusal is visible.
+
+        Ironbeam often rejects for margin without a ``statusMsg``; this shows
+        whether the account had room for the order. Never raises.
+        """
+        try:
+            b = self._balance()
+            summary = self.get_account_summary()
+            margin_ow = (b.get("marginInfo") or {}).get("marginOW") or {}
+            parts = [
+                f"netLiq=${summary['net_liquidation']:,.0f}",
+                f"initialMargin=${float(margin_ow.get('initialTotalMargin') or 0):,.0f}",
+                f"maintMargin=${float(margin_ow.get('maintenanceTotalMargin') or 0):,.0f}",
+                f"buyingPower=${summary['buying_power']:,.0f}",
+            ]
+            if margin_ow.get("marginError"):
+                parts.append(f"marginError={margin_ow['marginError']}")
+            hint = "  (no buying power left, likely a margin rejection)" if summary["buying_power"] <= 0 else ""
+            logger.error(f"[Ironbeam] Account at rejection: {'  '.join(parts)}{hint}")
+        except Exception as exc:
+            logger.warning(f"[Ironbeam] Could not read margin after rejection: {exc}")
 
     def get_account_summary(self) -> dict:
         b = self._balance()
@@ -531,19 +660,59 @@ class IronbeamBroker(BrokerBase):
             "buying_power": buying_power,
         }
 
-    def _net_positions(self) -> dict[str, dict]:
+    def _read_positions(self, timeout: Optional[float] = None, network_retry: bool = True) -> list[dict]:
         payload = self._request(
             "GET",
             "/account/positions",
             params={"accountId": self._account_id, "consolidate": "true"},
+            timeout=timeout,
+            network_retry=network_retry,
         )
+        return payload.get("positions") or []
+
+    def _margin_in_use(self) -> float:
+        info = self._balance().get("marginInfo") or {}
+        return float((info.get("marginO") or {}).get("initialTotalMargin") or 0.0)
+
+    def _confirmed_positions(self) -> list[dict]:
+        """Read positions, refusing an empty list the account's margin contradicts.
+
+        Reading "flat" while holding a position would make the strategy open a
+        second one. An empty list is believed when our own records are flat or
+        no margin is in use; otherwise it is read again, then raised as an error
+        so the caller skips instead of trading.
+        """
+        rows = self._read_positions()
+        if any(float(p.get("quantity") or 0) > 0 for p in rows):
+            return rows
+        if self._known_positions is not None and not any(self._known_positions.values()):
+            return rows
+        margin = self._margin_in_use()
+        for _ in range(_EMPTY_POSITIONS_READS - 1):
+            if margin <= 0:
+                return rows
+            self._sleep(_NETWORK_RETRY_WAIT_S)
+            rows = self._read_positions()
+            if any(float(p.get("quantity") or 0) > 0 for p in rows):
+                return rows
+            margin = self._margin_in_use()
+        if margin <= 0:
+            return rows
+        raise IronbeamError(
+            200, f"positions came back empty while ${margin:,.0f} of margin is in use, so they cannot be trusted"
+        )
+
+    def _net_positions(self) -> dict[str, dict]:
+        rows = self._confirmed_positions()
         by_root: dict[str, list[tuple[str, float, float, float]]] = {}
-        for p in payload.get("positions") or []:
+        known: dict[str, float] = {}
+        for p in rows:
             exch_sym = str(p.get("exchSym") or "")
             qty = float(p.get("quantity") or 0.0)
             if not exch_sym or qty <= 0:
                 continue
             signed = -qty if str(p.get("side", "")).upper() == "SHORT" else qty
+            known[exch_sym] = known.get(exch_sym, 0.0) + signed
             by_root.setdefault(root_of(exch_sym), []).append(
                 (exch_sym, signed, float(p.get("price") or 0.0), float(p.get("unrealizedPL") or 0.0))
             )
@@ -567,6 +736,7 @@ class IronbeamBroker(BrokerBase):
             }
             held[root] = IronbeamContract(exch_sym=main[0], root=root)
         self._held = held
+        self._known_positions = known
         return nets
 
     def get_open_positions(self) -> list[dict]:
@@ -596,6 +766,20 @@ class IronbeamBroker(BrokerBase):
                 }
             )
         return rows
+
+
+def _given_reason(leg: dict, order: dict) -> str:
+    """The reason Ironbeam gave for a failed order, or ``""``."""
+    for src in (leg, order):
+        for key in ("statusMsg", "statusReason", "rejectReason", "reason", "text", "message"):
+            if src.get(key):
+                return str(src[key])
+    return ""
+
+
+def _reject_reason(leg: dict, order: dict) -> str:
+    """Best-effort reason for a failed order; falls back to the raw order so it is never lost."""
+    return _given_reason(leg, order) or f"no reason field; order={order or leg}"
 
 
 def _result(

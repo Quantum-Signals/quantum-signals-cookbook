@@ -16,6 +16,15 @@ owning its broker SDK:
 | `qs-trader-broker-alpaca` | `qs_trader_broker_alpaca` | `AlpacaBroker`, `AlpacaSettings` (`ALPACA_*`) | `alpaca-py` |
 | `qs-trader-broker-ironbeam` | `qs_trader_broker_ironbeam` | `IronbeamBroker`, `IronbeamSettings` (`IRONBEAM_*`) | `requests` |
 
+## Ironbeam: futures in whole contracts
+
+`IronbeamBroker` trades CME Group futures (micros by default: an `ES` signal
+trades the `MES` contract month, e.g. `XCME:MES.Z26`) in whole contracts, long
+and short. It sets `supports_fractional = False`, so the strategy rounds every
+slice to at least one contract: no reserve and no dust. Notional is
+`qty × price × contract multiplier` (MES = $5 per point), with the multiplier
+taken from `contract_multipliers` keyed by the position symbol (the futures root).
+
 ## Discovery & selection
 
 Brokers are **discovered via entry points**, not a hardcoded list. Each package

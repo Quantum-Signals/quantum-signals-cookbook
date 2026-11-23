@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import date, datetime
 
 import pytest
+import requests
 
 from qs_trader_broker_ironbeam import IronbeamBroker, IronbeamContract, IronbeamSettings
-from qs_trader_broker_ironbeam.broker import candidate_symbols, root_of
+from qs_trader_broker_ironbeam.broker import IronbeamError, candidate_symbols, root_of
 
 BASE = "https://ib.test"
 # 2026-11-18 12:00 local; MES.Z26 expires 2026-12-18.
@@ -25,6 +26,7 @@ def _settings(**overrides) -> IronbeamSettings:
         roll_days=5,
         fill_timeout_s=2.0,
         http_timeout_s=5.0,
+        diagnostics=False,
     )
     values.update(overrides)
     return IronbeamSettings(**values)
@@ -59,16 +61,27 @@ class FakeIronbeam:
         self.next_status: list[FakeResponse] = []
         self.placed: list[dict] = []
         self.logins = 0
+        self.raise_next: list[Exception] = []
+        self.margin_o: dict = {}
+        self.per_contract = 2_400.0
+        self.state = "ENABLED"
+        self.start_as_of = NOW
+        # Reason on a REJECTED leg: one for every read, or one per read.
+        self.reject_msg: str | None | list = "Insufficient margin"
 
     def request(self, method, url, params=None, json=None, headers=None, timeout=None):
         assert url.startswith(f"{BASE}/v3/"), url
         path = url[len(BASE) + 3 :]
         self.calls.append((method, path, params, json))
+        if self.raise_next:
+            raise self.raise_next.pop(0)
         if self.next_status:
             return self.next_status.pop(0)
         if path != "/auth/login":
             assert headers["Authorization"].startswith("Bearer tok"), headers
         handler = getattr(self, f"_{method.lower()}_{path.strip('/').split('/')[0]}_{path.strip('/').split('/')[1] if '/' in path.strip('/') else ''}", None)
+        if path == "/order/updates":
+            return FakeResponse(200, {"status": "OK", "orders": []})
         if path.startswith("/order/") and method == "GET":
             return self._get_order(path.rsplit("/", 1)[-1])
         assert handler is not None, (method, path)
@@ -83,6 +96,10 @@ class FakeIronbeam:
         return FakeResponse(200, {"status": "OK", "traderId": "TRADER1", "accounts": self.accounts})
 
     def _get_account_balances(self, params, body):
+        if params.get("type") == "START_OF_DAY":
+            margin = {"marginO": {"asOfTime": self.start_as_of * 1000}}
+            row = {"currencyCode": "USD", "cashBalance": 50_000.0, "marginInfo": margin}
+            return FakeResponse(200, {"status": "OK", "balances": [row]})
         return FakeResponse(
             200,
             {
@@ -95,7 +112,7 @@ class FakeIronbeam:
                         "openTradeEquity": -125.0,
                         "netLiquidity": 49_875.0,
                         "netLiquidityAvailable": 49_875.0,
-                        "marginInfo": {"marginOW": {"initialTotalMargin": 2_500.0}},
+                        "marginInfo": {"marginO": self.margin_o, "marginOW": {"initialTotalMargin": 2_500.0}},
                     }
                 ],
             },
@@ -108,6 +125,7 @@ class FakeIronbeam:
     def _get_reference_securityDefinitions(self, params, body):
         defs = []
         for bare in params["symbols"].split(","):
+            bare = bare.split(":")[-1]
             exch_sym = f"XCME:{bare}"
             if exch_sym in self.expiries:
                 defs.append(
@@ -122,9 +140,34 @@ class FakeIronbeam:
                 )
         return FakeResponse(200, {"status": "OK", "securityDefinitions": defs})
 
+    def _get_reference_securityStatus(self, params, body):
+        rows = [{"exchSym": s, "status": "OPEN"} for s in params["symbols"].split(",")]
+        return FakeResponse(200, {"status": "OK", "securityStatuses": rows})
+
+    def _get_reference_securityMargin(self, params, body):
+        rows = [
+            {"exchSym": s, "maintMarginLong": self.per_contract, "maintMarginShort": self.per_contract}
+            for s in params["symbols"].split(",")
+        ]
+        return FakeResponse(200, {"status": "OK", "securityMarginAndValues": rows})
+
+    def _get_risk_riskInfo(self, params, body):
+        return FakeResponse(200, {"status": "OK", "risks": [{"tradingState": self.state}]})
+
+    def _get_market_depth(self, params, body):
+        rows = [
+            {
+                "exchSym": s,
+                "bids": [{"price": 6800.0, "size": 3}, {"price": 6000.0, "size": 50}],
+                "asks": [{"price": 6800.5, "size": 1}, {"price": 6801.0, "size": 2}, {"price": 7500.0, "size": 50}],
+            }
+            for s in params["symbols"].split(",")
+        ]
+        return FakeResponse(200, {"status": "OK", "depths": rows})
+
     def _get_market_quotes(self, params, body):
-        q = self.quotes.get(params["symbols"])
-        return FakeResponse(200, {"status": "OK", "quotes": [q] if q else []})
+        quotes = [self.quotes[s] for s in params["symbols"].split(",") if s in self.quotes]
+        return FakeResponse(200, {"status": "OK", "quotes": quotes})
 
     def _post_order_place(self, params, body):
         self.placed.append(body)
@@ -149,7 +192,9 @@ class FakeIronbeam:
         if filled:
             out["avgFillPrice"] = 6800.5
         if status == "REJECTED":
-            out["statusMsg"] = "Insufficient margin"
+            msg = self.reject_msg.pop(0) if isinstance(self.reject_msg, list) else self.reject_msg
+            if msg:
+                out["statusMsg"] = msg
         return FakeResponse(200, {"status": "OK", "order": {"orderId": order_id, "legs": [out]}})
 
 
@@ -260,6 +305,32 @@ def test_resolve_maps_qs_aliases_to_micro_front_month(api):
     assert len(lookups) == 2  # 13 candidate months → two batches of ≤10
 
 
+def _silver(api, nov_oi, dec_oi):
+    api.expiries["XCME:SIL.X26"] = datetime(2026, 11, 25, 12, 0).timestamp() * 1000
+    api.expiries["XCME:SIL.Z26"] = datetime(2026, 12, 29, 12, 0).timestamp() * 1000
+    for sym, oi in (("XCME:SIL.X26", nov_oi), ("XCME:SIL.Z26", dec_oi)):
+        if oi is not None:
+            api.quotes[sym] = {"exchSym": sym, "last": 45.0, "openInterest": oi}
+
+
+def test_resolve_picks_most_open_interest_over_thin_nearby_month(api):
+    _silver(api, nov_oi=522, dec_oi=21_831)
+    broker = _broker(api)
+    assert broker.resolve_contract("SI") == IronbeamContract("XCME:SIL.Z26", "SIL")
+
+
+def test_resolve_keeps_nearby_month_while_it_has_more_open_interest(api):
+    _silver(api, nov_oi=30_000, dec_oi=5_000)
+    broker = _broker(api)
+    assert broker.resolve_contract("SI").exch_sym == "XCME:SIL.X26"
+
+
+def test_resolve_falls_back_to_earliest_without_open_interest(api):
+    _silver(api, nov_oi=None, dec_oi=None)
+    broker = _broker(api)
+    assert broker.resolve_contract("SI").exch_sym == "XCME:SIL.X26"
+
+
 def test_resolve_full_size_roots_when_micros_off(api):
     api.expiries["XCME:ES.Z26"] = api.expiries["XCME:MES.Z26"]
     broker = _broker(api, use_micros=False)
@@ -358,6 +429,44 @@ def test_rejected_order_returns_none(api):
     assert broker.place_order(IronbeamContract("XCME:MES.Z26", "MES"), "BUY", 1) is None
 
 
+def test_rejected_order_logs_reason_and_margin(api):
+    from loguru import logger
+
+    lines: list[str] = []
+    sink = logger.add(lambda m: lines.append(str(m)), level="ERROR")
+    try:
+        api.order_status = ["REJECTED"]
+        broker = _broker(api)
+        assert broker.place_order(IronbeamContract("XCME:MES.Z26", "MES"), "BUY", 1) is None
+    finally:
+        logger.remove(sink)
+    text = "".join(lines)
+    assert "REJECTED: Insufficient margin" in text
+    assert "Account at rejection" in text
+    assert "initialMargin=$2,500" in text and "buyingPower=$47,375" in text
+
+
+def test_read_timeout_is_retried_once(api):
+    broker = _broker(api)
+    api.raise_next = [requests.ReadTimeout("slow")]
+    assert broker.get_account_summary()["net_liquidation"] == 49_875.0
+    assert [c[1] for c in api.calls[-2:]] == ["/account/balances", "/account/balances"]
+
+
+def test_read_timeout_twice_raises(api):
+    broker = _broker(api)
+    api.raise_next = [requests.ReadTimeout("slow"), requests.ReadTimeout("slow")]
+    with pytest.raises(requests.ReadTimeout):
+        broker.get_account_summary()
+
+
+def test_order_timeout_is_not_retried(api):
+    broker = _broker(api)
+    api.raise_next = [requests.ReadTimeout("slow")]
+    assert broker.place_order(IronbeamContract("XCME:MES.Z26", "MES"), "BUY", 1) is None
+    assert sum(1 for c in api.calls if c[1] == "/order/place") == 1
+
+
 def test_unfilled_order_returns_working_result_after_timeout(api):
     api.order_status = ["NEW"]
     broker = _broker(api)
@@ -434,3 +543,165 @@ def test_registered_as_entry_point():
 
     names = {ep.name for ep in entry_points(group="qs_trader_brokers")}
     assert "ironbeam" in names
+
+
+# ---------------------------------------------------------------------------
+# Empty position list while margin is in use
+# ---------------------------------------------------------------------------
+
+LONG_MES = {"exchSym": "XCME:MES.Z26", "quantity": 1.0, "price": 6800.0, "side": "LONG", "unrealizedPL": 0.0}
+
+
+def test_empty_positions_with_margin_in_use_are_not_trusted(api):
+    api.margin_o = {"initialTotalMargin": 3960.0, "maintenanceTotalMargin": 3600.0}
+    broker = _broker(api)
+    with pytest.raises(IronbeamError, match="cannot be trusted"):
+        broker.get_positions_for_sync()
+
+
+def test_empty_positions_are_reread_until_they_appear(api):
+    api.margin_o = {"initialTotalMargin": 3960.0}
+    broker = _broker(api)
+    original, reads = api._get_account_positions, []
+
+    def second_time(params, body):
+        reads.append(1)
+        if len(reads) == 2:
+            api.positions = [LONG_MES]
+        return original(params, body)
+
+    api._get_account_positions = second_time
+    assert broker.get_positions_for_sync()[0]["qty"] == 1.0
+
+
+def test_empty_positions_without_margin_mean_flat(api):
+    assert _broker(api).get_positions_for_sync() == []
+
+
+def test_empty_positions_trusted_after_our_own_close_even_if_margin_lags(api):
+    api.positions = [LONG_MES]
+    api.margin_o = {"initialTotalMargin": 3960.0}
+    broker = _broker(api)
+    broker.get_positions_for_sync()
+    assert broker.place_order(IronbeamContract("XCME:MES.Z26", "MES"), "SELL", 1).status == "filled"
+    api.positions = []
+    assert broker.get_positions_for_sync() == []
+
+
+def test_unclear_order_failure_forgets_known_positions(api):
+    broker = _broker(api)
+    broker.get_positions_for_sync()  # known flat
+    api.place_response = FakeResponse(504, {"status": "ERROR", "message": "timeout"})
+    broker.place_order(IronbeamContract("XCME:MES.Z26", "MES"), "BUY", 1)
+    api.margin_o = {"initialTotalMargin": 3960.0}
+    with pytest.raises(IronbeamError):
+        broker.get_positions_for_sync()
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def logs():
+    from loguru import logger
+
+    lines: list[str] = []
+    sink = logger.add(lambda m: lines.append(str(m)), level="DEBUG", format="{level} {message}")
+    yield lines
+    logger.remove(sink)
+
+
+def _line(logs: list[str], text: str) -> str:
+    found = [x for x in logs if text in x]
+    assert found, f"{text!r} not in:\n" + "".join(logs)
+    return found[-1]
+
+
+@pytest.mark.parametrize(
+    "maint, predicted",
+    # Friday's two closest calls: 15:57 filled, 15:52 was rejected.
+    [(49_736 - 2 * 3600, "accept"), (50_400 - 2 * 3600, "reject")],
+)
+def test_order_prediction_uses_start_of_day_cash(api, logs, maint, predicted):
+    api.positions = [dict(LONG_MES, quantity=12.0)]
+    api.margin_o = {"maintenanceTotalMargin": maint, "initialTotalMargin": maint * 1.1}
+    api.per_contract = 3600.0
+    broker = _broker(api, diagnostics=True)
+    broker.get_positions_for_sync()
+    broker.place_order(IronbeamContract("XCME:MES.Z26", "MES"), "BUY", 2)
+    assert f"expect={predicted}" in _line(logs, "PRE-ORDER")
+
+
+def test_rejection_logs_matching_causes_and_count(api, logs):
+    api.positions = [dict(LONG_MES, quantity=12.0)]
+    api.margin_o = {"maintenanceTotalMargin": 48_000.0, "initialTotalMargin": 52_800.0}
+    api.per_contract = 3600.0
+    api.order_status = ["REJECTED"]
+    api.reject_msg = None
+    api.state = "DISABLED_FOR_DAY"
+    broker = _broker(api, diagnostics=True)
+    broker.get_positions_for_sync()
+    contract = IronbeamContract("XCME:MES.Z26", "MES")
+    assert broker.place_order(contract, "BUY", 5) is None
+    assert broker.place_order(contract, "BUY", 5) is None
+    line = _line(logs, "ORDER RESULT")
+    assert "rejection 2 in a row" in line and "prediction correct=yes" in line
+    assert "DISABLED_FOR_DAY" in line and "margin: about $66,000" in line and "only 3 contract(s)" in line
+
+
+def test_late_reject_reason_is_picked_up(api, logs):
+    api.order_status = ["REJECTED"]
+    api.reject_msg = [None, "Exceeds buying power"]
+    broker = _broker(api, diagnostics=True)
+    assert broker.place_order(IronbeamContract("XCME:MES.Z26", "MES"), "BUY", 1) is None
+    assert "REJECTED: Exceeds buying power" in "".join(logs)
+
+
+def test_startup_check_logs_state_margin_and_positions(api, logs):
+    api.positions = [dict(LONG_MES, dateOpened="20261117")]
+    api.margin_o = {"maintenanceTotalMargin": 60_000.0, "initialTotalMargin": 66_000.0}
+    api.start_as_of = NOW - 5 * 86_400
+    broker = _broker(api, diagnostics=True)
+    broker.startup_entitlement_warnings(["ES"])
+    assert "ENABLED" in _line(logs, "CHECK account state")
+    assert "startOfDayCash=$50,000" in _line(logs, "CHECK margin: cash")
+    assert "no room left" in "".join(logs) and "below the $60,000" in "".join(logs)
+    assert "restored an older copy" in "".join(logs)
+    assert "+1" in _line(logs, "CHECK position XCME:MES.Z26") and "20261117" in "".join(logs)
+    assert "x3" in _line(logs, "CHECK contract XCME:MES.Z26")
+
+
+def test_startup_warns_about_held_contract_that_is_thin_and_expiring(api):
+    api.expiries["XCME:MES.X26"] = (NOW + 2 * 86_400) * 1000
+    api.positions = [dict(LONG_MES, exchSym="XCME:MES.X26")]
+    broker = _broker(api, diagnostics=True)
+    warnings = broker.startup_entitlement_warnings(["ES"])  # before any positions read, as in the app
+    assert any("XCME:MES.X26 expires in 2.0" in w for w in warnings)
+    assert any("XCME:MES.X26 is thin" in w for w in warnings)
+
+
+def test_failing_checks_never_stop_an_order(api, logs):
+    broker = _broker(api, diagnostics=True)
+    original = api.request
+
+    def only_orders_work(method, url, **kwargs):
+        if "/order/" not in url:
+            raise requests.ReadTimeout("slow")
+        return original(method, url, **kwargs)
+
+    api.request = only_orders_work
+    result = broker.place_order(IronbeamContract("XCME:MES.Z26", "MES"), "BUY", 1)
+    assert result is not None and result.status == "filled"
+    assert "PRE-ORDER check incomplete" in "".join(logs)
+    assert len(api.placed) == 1
+
+
+def test_closing_orders_are_never_predicted_to_be_rejected():
+    from qs_trader_broker_ironbeam.diagnostics import OrderCheck, margin_after
+
+    assert margin_after(48_000, 3600, +12, "SELL", 2) == (40_800, 0)
+    assert margin_after(48_000, 3600, +1, "SELL", 3) == (51_600, 2)
+    check = OrderCheck("X", "SELL", 2, opening=0, margin_after=60_000, start_cash=50_000)
+    assert check.predicted == "accept"

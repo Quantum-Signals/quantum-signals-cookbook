@@ -205,7 +205,7 @@ Broker-specific quirks worth knowing here:
 | Class | Notes |
 |-------|-------|
 | `AlpacaBroker` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
-| `IronbeamBroker` | Contract = `IronbeamContract(exch_sym="XCME:MES.Z26", root="MES")`. Front month = earliest listed contract more than `IRONBEAM_ROLL_DAYS` from expiry (via `securityDefinitions`), cached per day; a held contract is traded until flat. Whole contracts, netting account, `FAST_ORDER` MARKET/DAY, fill polled via `GET /order/{id}`. Never calls `/auth/logout` (it revokes every session of the login) |
+| `IronbeamBroker` | Contract = `IronbeamContract(exch_sym="XCME:MES.Z26", root="MES")`. Contract month = the listed contract with the most open interest among those more than `IRONBEAM_ROLL_DAYS` from expiry (`securityDefinitions` + `quotes`), cached per day; a held contract is traded until flat. Whole contracts, netting account, `FAST_ORDER` MARKET/DAY, fill polled via `GET /order/{id}`. Never calls `/auth/logout` (it revokes every session of the login) |
 | `SimulatedBroker` | Jittered seed prices (`SIM_PRICE_JITTER`, `0` = deterministic); no external broker |
 
 ### Strategies (`src/trader/strategy/`)

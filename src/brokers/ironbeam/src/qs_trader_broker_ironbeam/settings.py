@@ -35,3 +35,6 @@ class IronbeamSettings(BaseSettings):
     # How long place_order polls GET /order/{id} for a fill before returning.
     fill_timeout_s: float = Field(default=10.0, ge=0)
     http_timeout_s: float = Field(default=15.0, gt=0)
+    # Log account, margin and order book checks at startup and around each order
+    # (read-only; adds two to four quick reads before an order).
+    diagnostics: bool = True

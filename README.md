@@ -213,7 +213,8 @@ CL (→ USO), GC (→ GLD), SI (→ SLV), NG (→ UNG), and AAPL. See
 
 Alpaca supports **equities and ETFs only** — futures names are mapped to correlated
 ETFs. Ironbeam trades the CME Group futures themselves, micros by default
-(`ES` → `MES`, front month resolved daily; see `ironbeam_symbol_map()`). See
+(`ES` → `MES`, `GC` → `MGC`, `SI` → `SIL`; the most-traded contract month is
+resolved daily; see `ironbeam_symbol_map()`). See
 [docs/brokers.md](docs/brokers.md).
 
 ---
@@ -238,13 +239,62 @@ The bot has **two layers** of safety, applied in this order:
 
 ### Ironbeam (`TRADER_BROKER=ironbeam`)
 
-REST API v3, CME Group futures in whole contracts. Set `IRONBEAM_API_KEY`
-(plus `IRONBEAM_USERNAME` / `IRONBEAM_PASSWORD` for tenant keys). Live and
-simulated accounts are separate Ironbeam deployments with separate keys: which
-one you trade is decided by the key and `IRONBEAM_BASE_URL`, not by a flag here.
-Check it with `uv run python scripts/smoke_ironbeam.py` (read-only) first.
-Orders are at least one contract per slice, so a small `TRADER_DAILY_START_CAPITAL`
-still trades one micro contract each interval.
+REST API v3, CME Group futures (micros by default) in **whole contracts**, long
+and short. There is no fractional trading, so no dust positions.
+
+**Credentials.** Set `IRONBEAM_API_KEY`, `IRONBEAM_USERNAME` (the trader id, e.g.
+`DEMO…`) and `IRONBEAM_PASSWORD`. Leave `IRONBEAM_ACCOUNT_ID` empty unless the
+login sees several accounts (startup then lists them). `IRONBEAM_BASE_URL`
+defaults to `https://api.ironbeamapi.com`; set it only if the onboarding material
+names another host.
+
+**Demo vs live.** Live and simulated accounts are separate Ironbeam deployments
+with separate keys: the key decides which one you trade, not a flag here (the
+startup banner prints `LIVE (IRONBEAM)` for any real broker; the
+`Connected to Ironbeam … account=` line shows which account it is).
+
+**First check (read-only, places no orders):**
+
+```bash
+uv run python scripts/smoke_ironbeam.py
+```
+
+It logs in and prints the contract chosen for each allowed symbol, quotes,
+balances and positions.
+
+**Running without Docker.** `IRONBEAM_*` settings are read from the environment,
+not from `.env` by the app, so pass the file to uv (Docker Compose already does):
+
+```bash
+uv run --env-file .env live-trader
+```
+
+**Contract month.** For each product the broker takes, among listed contracts
+more than `IRONBEAM_ROLL_DAYS` from expiry, the one with the most open interest
+(so silver trades December, not a thin November delivery month), cached per day.
+While the account holds a contract, that one is traded until flat.
+
+**Sizing.** Every order is at least one contract (≈ $37k for one MES or MGC,
+≈ $45k for one SIL at late-2026 prices), whatever `TRADER_DAILY_START_CAPITAL`
+says. Repeated signals in one direction add a contract per interval per symbol,
+and each contract ties up margin. On a small account use a long interval
+(`TRADER_EXECUTION_INTERVAL_MINUTES=30`–`60`) and few symbols.
+`IRONBEAM_USE_MICROS=false` trades full-size contracts (10× larger) and only
+suits large accounts.
+
+**Order checks.** Ironbeam can reject an order without saying why, so the broker
+logs read-only checks (set `IRONBEAM_DIAGNOSTICS=false` to turn them off; they
+add about 1.5 s before an order and never block one). Search the log for:
+
+| Log text | Shows |
+|---|---|
+| `CHECK` (startup) | account trading state, margin room, held contracts, working orders, expiry, thin books |
+| `PRE-ORDER` | position, order book, margin before and after, and the expected outcome |
+| `ORDER RESULT` | accepted or rejected, whether the expectation held, and the causes that fit |
+| `AFTER REJECTION` | account state, all three margin tiers and the contract's session state |
+
+The expectation uses a rule inferred from demo rejections, not a documented one:
+maintenance margin after the order must stay under the start-of-day cash.
 
 ### Recommended progression
 
@@ -259,4 +309,7 @@ ALPACA_PAPER=true
 # 3. Live trading — only after paper results look correct
 TRADER_BROKER=alpaca
 ALPACA_PAPER=false
+
+# Ironbeam: run smoke_ironbeam.py, then the bot on a demo key, before a live key
+TRADER_BROKER=ironbeam
 ```
