@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import os
 import queue
+import signal as os_signal
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from loguru import logger
 from quantumsignals.client import Client as QSClient
 from trader.access_control import run_startup_access_checks
 from trader.config import Settings, load_settings
+from qs_trader_broker_core import OrderResult
 from trader.brokers import BrokerBase, create_broker
 from trader.models import PerformanceTracker
 from trader.reporting import (
@@ -206,67 +210,227 @@ def _log_signal_catalog(settings: Settings) -> None:
         logger.warning(f"Could not fetch signal catalog: {exc}")
 
 
+class _InterruptGuard:
+    """Keep a repeated Ctrl-C from aborting the closing of positions.
+
+    The first SIGINT raises ``KeyboardInterrupt`` as usual. From then on (or
+    while ``closing()`` is active at end of day) further SIGINTs only print a
+    notice, because interrupting the close would leave positions open.
+    ``FORCE_QUIT_PRESSES`` further ones still abort, as an escape hatch.
+
+    The switch happens inside the handler, so there is no gap between the first
+    Ctrl-C and the shutdown code in which a second one could get through.
+    """
+
+    FORCE_QUIT_PRESSES = 5
+
+    def __init__(self, stop_event: threading.Event) -> None:
+        self._stop_event = stop_event
+        self._closing = False
+        self._extra = 0
+        self._previous: object = None
+        self._installed = False
+
+    def install(self) -> None:
+        # Python only allows signal handlers in the main thread.
+        if threading.current_thread() is threading.main_thread():
+            self._previous = os_signal.signal(os_signal.SIGINT, self._handle)
+            self._installed = True
+
+    def uninstall(self) -> None:
+        if self._installed:
+            os_signal.signal(os_signal.SIGINT, self._previous)
+            self._installed = False
+
+    @contextmanager
+    def closing(self) -> Iterator[None]:
+        """Hold back Ctrl-C during the block; it then stops the run afterwards."""
+        before, self._closing = self._closing, True
+        try:
+            yield
+        finally:
+            self._closing = before
+
+    def _handle(self, signum: int, frame: object) -> None:
+        if not self._closing:
+            self._closing = True
+            raise KeyboardInterrupt
+        self._stop_event.set()
+        self._extra += 1
+        if self._extra >= self.FORCE_QUIT_PRESSES:
+            raise KeyboardInterrupt
+        left = self.FORCE_QUIT_PRESSES - self._extra
+        # os.write, not the logger: the signal may land while its lock is held.
+        os.write(
+            2,
+            f"\nClosing positions, please wait. Press Ctrl-C {left} more time(s) to "
+            f"force quit and LEAVE POSITIONS OPEN.\n".encode(),
+        )
+
+
+_CLOSE_ROUNDS = 3  # order attempts per position
+_CLOSE_READ_TRIES = 3  # position-read attempts
+_CLOSE_SETTLE_POLLS = 5  # re-reads while waiting for closing fills to show
+_CLOSE_WAIT_S = 2.0
+_FLAT_QTY = 1e-9
+
+
+def _read_positions(broker: BrokerBase) -> dict[str, dict] | None:
+    """Non-flat broker positions by symbol, or ``None`` when they cannot be read."""
+    for attempt in range(1, _CLOSE_READ_TRIES + 1):
+        try:
+            rows = broker.get_positions_for_sync()
+            return {p["symbol"]: p for p in rows if abs(float(p["qty"])) >= _FLAT_QTY}
+        except Exception as exc:
+            logger.warning(f"Reading positions failed ({attempt}/{_CLOSE_READ_TRIES}): {exc}")
+            if attempt < _CLOSE_READ_TRIES:
+                time.sleep(_CLOSE_WAIT_S)
+    return None
+
+
+def _send_close(broker: BrokerBase, sym: str, qty: float) -> tuple[object, OrderResult | None, bool]:
+    """Send one closing order. Returns ``(contract, result, retryable)``."""
+    try:
+        contract = broker.resolve_contract(sym)
+    except Exception as exc:
+        logger.error(f"  -> Resolving {sym} failed: {exc}")
+        return None, None, True
+    if contract is None:
+        logger.error(f"  -> Cannot resolve contract for {sym} — manual close required")
+        return None, None, False
+    try:
+        trade = broker.place_order(contract, "SELL" if qty > 0 else "BUY", abs(qty))
+    except Exception as exc:
+        logger.error(f"  -> Close order for {sym} raised: {exc}")
+        trade = None
+    return contract, trade, True
+
+
 def _close_all_positions(
     broker: BrokerBase,
     settings: Settings,
     perf: PerformanceTracker,
-) -> float:
-    """Flatten every open position at the broker.
+) -> tuple[float, dict[str, float] | None]:
+    """Flatten every open position, checking the result against the broker.
 
-    Each close is recorded in *perf* so the daily summary is complete.
-    Returns the total dollar PnL realised by these exit trades.
+    A position counts as closed (and is recorded in *perf*) only when the
+    broker no longer reports it. Failed orders are retried for what is still
+    open. An accepted order that has not shown up yet is never sent again,
+    since it could fill twice and flip the position.
+
+    Returns ``(exit_pnl, still_open)``: the dollar PnL realised, and signed
+    quantities left open by symbol. ``None`` means positions could not be read,
+    so what is open is unknown.
     """
     from trader.models import Signal
 
     exit_pnl = 0.0
-    try:
-        pos_list = broker.get_positions_for_sync()
-        if not pos_list:
-            logger.info("No open positions to close")
-            return 0.0
+    positions = _read_positions(broker)
+    if positions is None:
+        logger.critical(
+            "POSITIONS NOT CLOSED: the broker's positions could not be read. "
+            "Check the account and close them by hand."
+        )
+        return 0.0, None
+    if not positions:
+        logger.info("No open positions to close")
+        return 0.0, {}
 
-        logger.warning(f"CLOSE: flattening {len(pos_list)} open position(s)…")
-        for p in pos_list:
-            sym = p["symbol"]
+    logger.warning(f"CLOSE: flattening {len(positions)} open position(s)…")
+    todo = dict(positions)
+    still_open = {sym: float(p["qty"]) for sym, p in positions.items()}
+
+    for round_no in range(1, _CLOSE_ROUNDS + 1):
+        sent: dict[str, tuple[object, OrderResult | None, bool]] = {}
+        for sym, p in todo.items():
             qty = float(p["qty"])
-            avg_price = p["avg_price"]
-            if abs(qty) < 1e-9:
-                continue
-
             label = "LONG" if qty > 0 else "SHORT"
-            logger.warning(f"  {label} {abs(qty)}x {sym} @ {avg_price:.2f}")
+            logger.warning(f"  {label} {abs(qty):g}x {sym} @ {p['avg_price']:.2f}")
+            sent[sym] = _send_close(broker, sym, qty)
 
-            contract = broker.resolve_contract(sym)
-            if contract is None:
-                logger.error(f"  -> Cannot resolve contract for {sym} — manual close required")
+        # Positions can lag a fill: re-read until everything sent is gone.
+        after = None
+        for poll in range(_CLOSE_SETTLE_POLLS):
+            after = _read_positions(broker)
+            if after is None or not any(s in after for s, (_, t, _r) in sent.items() if t):
+                break
+            if poll < _CLOSE_SETTLE_POLLS - 1:
+                time.sleep(_CLOSE_WAIT_S)
+
+        retry: dict[str, dict] = {}
+        for sym, (contract, trade, retryable) in sent.items():
+            p = todo[sym]
+            qty = float(p["qty"])
+            label = "LONG" if qty > 0 else "SHORT"
+            if after is None:
+                # Cannot check: believe only an order the broker called filled.
+                filled = trade is not None and str(trade.status).lower() == "filled"
+                left = 0.0 if filled else qty
+            else:
+                left = float(after[sym]["qty"]) if sym in after else 0.0
+
+            flipped = left * qty < 0
+            closed = qty if flipped else qty - left
+            if closed * qty > 0 and abs(closed) >= _FLAT_QTY:
+                exit_pnl += _record_exit(
+                    broker, settings, perf, sym, contract, trade, closed, float(p["avg_price"]), Signal
+                )
+            if abs(left) < _FLAT_QTY:
+                still_open.pop(sym, None)
                 continue
 
-            action = "SELL" if qty > 0 else "BUY"
-            trade = broker.place_order(contract, action, abs(qty))
-
-            fill_price = trade.price if trade else None
-            if fill_price is None:
-                fill_price = broker.get_last_price(contract)
-
-            if fill_price is not None:
-                multiplier = settings.contract_multipliers.get(sym, 1.0)
-                pnl = (fill_price - avg_price) * qty * multiplier
-                exit_pnl += pnl
-
-                direction = Signal.UP if qty > 0 else Signal.DOWN
-                perf.record_close(sym, pnl, direction)
-
-                logger.info(
-                    f"  -> Closed {label} {abs(qty)}x {sym} @ {fill_price:.2f}  "
-                    f"PnL=${pnl:+,.2f}"
+            still_open[sym] = left
+            if flipped:
+                logger.critical(f"  -> {sym} is now {left:+g}, on the other side — check the account")
+            elif trade is not None:
+                logger.error(
+                    f"  -> Close order for {sym} was accepted but {left:+g} is still open; "
+                    f"not sending it again (it may still fill)"
                 )
             else:
-                logger.info(f"  -> Closed {label} {abs(qty)}x {sym} (fill price unavailable)")
+                logger.error(f"  -> {label} {abs(left):g}x {sym} NOT closed: the order failed")
+                if retryable and after is not None:
+                    retry[sym] = after[sym]
 
-    except Exception as exc:
-        logger.error(f"Error closing positions: {exc}")
+        if after is None:
+            logger.critical("Positions could not be re-read after the closing orders")
+        if not retry or round_no == _CLOSE_ROUNDS:
+            break
+        logger.warning(f"Retrying {len(retry)} failed close(s) ({round_no + 1}/{_CLOSE_ROUNDS})…")
+        time.sleep(_CLOSE_WAIT_S)
+        todo = retry
 
-    return exit_pnl
+    if after is None:
+        return exit_pnl, still_open or None
+    return exit_pnl, still_open
+
+
+def _record_exit(
+    broker: BrokerBase,
+    settings: Settings,
+    perf: PerformanceTracker,
+    sym: str,
+    contract: object,
+    trade: OrderResult | None,
+    qty: float,
+    avg_price: float,
+    signal_cls: type,
+) -> float:
+    """Book the PnL of *qty* (signed) that is confirmed closed."""
+    label = "LONG" if qty > 0 else "SHORT"
+    fill_price = trade.price if trade else None
+    if fill_price is None and contract is not None:
+        try:
+            fill_price = broker.get_last_price(contract)
+        except Exception as exc:
+            logger.warning(f"  -> No price for {sym}: {exc}")
+    if fill_price is None:
+        logger.info(f"  -> Closed {label} {abs(qty):g}x {sym} (fill price unavailable)")
+        return 0.0
+    pnl = (fill_price - avg_price) * qty * settings.contract_multipliers.get(sym, 1.0)
+    perf.record_close(sym, pnl, signal_cls.UP if qty > 0 else signal_cls.DOWN)
+    logger.info(f"  -> Closed {label} {abs(qty):g}x {sym} @ {fill_price:.2f}  PnL=${pnl:+,.2f}")
+    return pnl
 
 
 def _run_trading_day(
@@ -469,9 +633,10 @@ def _snapshot_pre_close(broker: BrokerBase) -> dict:
         positions = broker.get_positions_for_sync()
     except Exception as exc:
         logger.warning(f"EOD snapshot: positions failed: {exc}")
-        positions = []
+        positions = None
     return {
         "positions": positions or [],
+        "positions_known": positions is not None,
         "unrealized_pnl": float(acct.get("unrealized_pnl") or 0.0),
         "realized_pnl": float(acct.get("realized_pnl") or 0.0),
         "net_liquidation": acct.get("net_liquidation"),
@@ -493,11 +658,21 @@ def _flatten_and_summarize(
     intraday_closes = perf.total_trades
     exit_pnl = 0.0
     if settings.close_on_exit:
-        exit_pnl = _close_all_positions(broker, settings, perf)
+        exit_pnl, still_open = _close_all_positions(broker, settings, perf)
+    elif snapshot["positions_known"]:
+        still_open = {p["symbol"]: float(p["qty"]) for p in snapshot["positions"]}
+    else:
+        still_open = None
+    snapshot["still_open"] = still_open
     _log_day_summary(
         day, perf, intraday_pnl, exit_pnl, settings,
         snapshot=snapshot, intraday_closes=intraday_closes,
     )
+    if settings.close_on_exit and still_open is None:
+        logger.critical("Could not confirm the account is flat — check it and close by hand")
+    elif settings.close_on_exit and still_open:
+        left = ", ".join(f"{sym} {qty:+g}" for sym, qty in sorted(still_open.items()))
+        logger.critical(f"STILL OPEN at the broker: {left} — close by hand")
     return intraday_pnl, exit_pnl
 
 
@@ -634,8 +809,10 @@ def main() -> None:
     cumulative_losses = 0
     shutdown_reason = "manual (Ctrl-C)"
 
+    guard = _InterruptGuard(stop_event)
     logger.info("Bot running. Press Ctrl-C to stop.")
     try:
+        guard.install()
         while not stop_event.is_set():
             now = datetime.now(tz)
             session_start, eod_dt = _compute_next_session_window(now, settings)
@@ -678,7 +855,8 @@ def main() -> None:
                 eod_dt, tz, broker, strategy, perf, settings, stop_event, signal_queue
             )
 
-            _flatten_and_summarize(trading_day, broker, perf, settings)
+            with guard.closing():
+                _flatten_and_summarize(trading_day, broker, perf, settings)
 
             cumulative_pnl += perf.gross_pnl
             cumulative_trades += perf.total_trades
@@ -727,3 +905,4 @@ def main() -> None:
         broker.disconnect()
         logger.info("Goodbye.")
         _close_day_log(day_log_id)
+        guard.uninstall()
