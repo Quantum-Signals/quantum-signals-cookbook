@@ -116,13 +116,13 @@ QS stream thread  →  signal_queue  →  main thread (strategy + broker)
 
 When `TRADER_RUN_DAYS=0` (default), the process runs until Ctrl-C:
 
-1. `_compute_next_session_window()` — next weekday `TRADER_SESSION_START_TIME` → `TRADER_SESSION_END_TIME`
+1. `_compute_next_session_window()` — next trading day `TRADER_SESSION_START_TIME` → `TRADER_SESSION_END_TIME`
 2. If before start → `_sleep_until()` (discards off-hours signals from queue)
 3. Pre-session `strategy.sync_positions()` again
 4. `_run_trading_day()` until EOD
-5. `_close_all_positions()` if `TRADER_CLOSE_ON_EXIT`
+5. `PositionCloser.close_all()` if `TRADER_CLOSE_ON_EXIT`
 6. `_log_day_summary()` → `perf.reset()` → `strategy.reset_for_new_day()`
-7. Sleep until next weekday (weekends skipped; **no US holiday calendar**)
+7. Sleep until next weekday (weekends and US holidays skipped, see `market_calendar.py`); if not flat, try to close every 15 min
 
 **Logs:** `logs/session_<YYYY-MM-DD>_<HH-MM-SS>.log` where `HH-MM-SS` is process start time. Same-day restart → second file.
 
@@ -141,7 +141,9 @@ When `TRADER_RUN_DAYS=0` (default), the process runs until Ctrl-C:
 |-------|----------|
 | Invalid QS API key | Stream sets `stop_event`, process exits |
 | Transient QS errors | Backoff, max 5 retries (`Settings.max_stream_retries`) |
-| Ctrl-C | Flatten if `TRADER_CLOSE_ON_EXIT`, day summary, RUN SUMMARY |
+| Ctrl-C, SIGTERM, SIGHUP | Flatten if `TRADER_CLOSE_ON_EXIT`, day summary, RUN SUMMARY |
+| Unexpected exception | Flatten, log the traceback, exit non-zero |
+| SIGKILL, power cut | Nothing; the next start flattens (`TRADER_CLOSE_ON_START`) |
 | `TRADER_RUN_DAYS=N` | Exit after N completed EODs |
 
 ---
@@ -182,7 +184,8 @@ live-trader/                # uv workspace root (the app)
 | Layer | Files | Key entry points |
 |-------|-------|------------------|
 | Entry | `main.py` | `main()` |
-| Orchestration | `app.py` | `main`, `_run_trading_day`, `_close_all_positions`, `_sleep_until` |
+| Orchestration | `app.py` | `main`, `_run_trading_day`, `_sleep_until` |
+| Closing | `closing.py` | `PositionCloser`, `StopGuard` |
 | Config | `config.py` | `Settings`, `load_settings` |
 | Access | `access_control.py` | `run_startup_access_checks` |
 | Symbols | `src/symbols/` (`qs_trader_symbols`) | `canonicalize`, `parse_allowed_symbols`, broker map helpers |
@@ -427,11 +430,16 @@ Realized PnL on **closes** (position crosses zero or flips sign) is recorded in 
 
 ### 4.3 App-level risk actions
 
-**EOD / shutdown flatten** — `_close_all_positions()` in `app.py`:
+**EOD / shutdown flatten** — `PositionCloser` in `closing.py`:
 
+- `signal_windows.py`: entry windows gate `MomentumStrategy.handle_signal()`; `PositionCloser.close_instruments()` closes one instrument at its published exit time
 - Iterates broker positions (not strategy dict)
 - Market order to flat; PnL uses `contract_multipliers` from settings
-- Records each close in `PerformanceTracker`
+- Counts a position as closed, and records it in `PerformanceTracker`, only once the broker stops reporting it
+- Cancels working orders first (`cancel_working_orders()`), so nothing fills after the close
+- Retries a close when the broker sets `last_order_not_placed`; an order that may still fill is resent only after the broker confirms no order is working
+- `PositionCloser.close()` repeats this until the broker reports flat twice in a row
+- Reports anything still open; a repeated Ctrl-C does not interrupt it (five more force quit)
 
 Realized PnL is tracked in `PerformanceTracker` (`record_close()` on strategy closes and EOD flatten).
 
@@ -518,6 +526,9 @@ uv run pytest -v
 | `tests/test_models.py` | `PerformanceTracker` |
 | `tests/test_access_control.py` | Startup QS entitlement checks |
 | `src/brokers/core/tests/test_simulated_broker.py` | `SimulatedBroker` (co-located with the core broker package) |
+| `tests/test_signal_windows.py` | Published entry and exit times |
+| `tests/test_shutdown.py` | Closing on every stop path, until flat |
+| `tests/test_market_calendar.py` | US holidays and half days |
 | `tests/test_strategy.py` | `MomentumStrategy` + `FakeSignal` |
 | `src/symbols/tests/test_catalog.py` | QS symbol catalog |
 
@@ -554,7 +565,6 @@ uv run python scripts/smoke_multiday_supervisor.py --days 3
 
 ### Recommended enhancements
 
-- US market holiday calendar
 - Expose `max_stream_retries` via env
 - Health metric (last signal timestamp / stream alive)
 - Structured metrics (Prometheus, CloudWatch)
@@ -568,7 +578,7 @@ uv run python scripts/smoke_multiday_supervisor.py --days 3
 | How is order qty computed? | `momentum._compute_order_qty`, `_execute` |
 | Why fractional reserve? | `MomentumStrategy.__init__` docstring; `_snap_target` |
 | How are close/open legs planned? | `momentum._plan_legs`, `_broker_state` |
-| When is EOD flatten? | `app._run_trading_day`, `_close_all_positions` |
+| When is EOD flatten? | `app._run_trading_day`, `PositionCloser` |
 | How are signals ingested? | `streaming.stream_signals_thread` |
 | Broker selection? | `brokers.create_broker` |
 | QS symbol catalog? | `qs_trader_symbols` |

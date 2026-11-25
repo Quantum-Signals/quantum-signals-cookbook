@@ -19,6 +19,7 @@ from qs_trader_symbols import (
     trading_targets,
 )
 from trader.models import PerformanceTracker, Signal, sig_label
+from trader.signal_windows import SignalWindows
 from trader.strategy.base import StrategyBase
 
 
@@ -183,8 +184,10 @@ class MomentumStrategy(StrategyBase):
         broker: BrokerBase,
         perf: PerformanceTracker,
         settings: Settings,
+        windows: SignalWindows | None = None,
     ) -> None:
         self.broker = broker
+        self._windows = windows
         self.perf = perf
         self._settings = settings
 
@@ -346,6 +349,13 @@ class MomentumStrategy(StrategyBase):
         # that aren't visible in the log but cause the 5-min boundary to be
         # missed by <1 s, making the effective interval 6 min instead of 5 min.
         signal_ts = math.floor(_signal_ts_epoch(ts))
+
+        # Outside its window a signal neither trades nor restarts the interval.
+        if self._windows is not None and not self._windows.allows(
+            canon, datetime.fromtimestamp(signal_ts, timezone.utc)
+        ):
+            return
+
         elapsed = signal_ts - self._last_exec_time.get(canon, 0.0)
         if elapsed < self._interval_s:
             remaining = self._interval_s - elapsed

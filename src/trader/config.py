@@ -88,6 +88,15 @@ class Settings(BaseSettings):
     # (e.g. GC→GLD on Alpaca). Empty = allow all catalog symbols.
     allowed_symbols: Annotated[list[str], NoDecode] = []
     close_on_exit: bool = True
+    # Close positions left by an earlier session before trading. Unset follows
+    # close_on_exit: a bot that must end flat must also start flat.
+    close_on_start: bool | None = None
+    # Skip US market holidays and end the session early on half days, so that
+    # positions are closed while the market is still open.
+    us_market_calendar: bool = True
+    # Follow the entry and exit times each signal publishes: trade only inside
+    # its entry window, hold, and close it at its exit time.
+    follow_signal_windows: bool = True
     daily_start_capital: float = 1_000_000.0
     # Per-symbol capital allocation. Format: ``"RTY:1000000,YM:500000"``.
     # If set, overrides equal-split of ``daily_start_capital``. Symbols not
@@ -141,6 +150,10 @@ class Settings(BaseSettings):
         if v is None or v == "":
             return {}
         return _parse_symbol_capital(v)  # type: ignore[arg-type]
+
+    @property
+    def flatten_on_start(self) -> bool:
+        return self.close_on_exit if self.close_on_start is None else self.close_on_start
 
     @field_validator("execution_interval_minutes")
     @classmethod

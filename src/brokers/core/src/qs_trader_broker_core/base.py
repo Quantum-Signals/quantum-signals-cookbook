@@ -70,6 +70,13 @@ class BrokerBase(ABC):
     #: fractional order sizing. Override to ``True`` on brokers that support it.
     supports_fractional: bool = False
 
+    #: Set to ``True`` by ``place_order`` when it returns ``None`` because the
+    #: order was definitely refused or never sent, so nothing can fill. Leave it
+    #: ``False`` when the outcome is unknown (timeout, dropped connection, server
+    #: error). The app clears it before a closing order and resends only when it
+    #: is ``True``: resending an order that then fills would flip the position.
+    last_order_not_placed: bool = False
+
     @abstractmethod
     def connect(self) -> None: ...
 
@@ -131,7 +138,8 @@ class BrokerBase(ABC):
 
         Returns ``None`` when the order is rejected or otherwise not submitted —
         the strategy treats ``None`` as a failed leg and re-plans on the next
-        interval. On success, ``OrderResult.price`` is the fill price when known
+        interval. Set ``last_order_not_placed`` when the refusal is certain, or
+        a failed closing order will not be retried. On success, ``OrderResult.price`` is the fill price when known
         (the broker extracts it from its native result) or ``None`` if the
         order had not filled before the poll timeout.
         """
@@ -147,6 +155,16 @@ class BrokerBase(ABC):
     def get_positions_for_sync(self) -> list[dict]:
         """Return positions with symbol, signed qty, and average entry price."""
         ...
+
+    def cancel_working_orders(self) -> bool:
+        """Cancel every order still working on the account.
+
+        Return ``True`` only when the broker confirms that none is left, so
+        nothing can fill afterwards. The app calls this before closing positions:
+        a working order that fills later would reopen one. Without it (the
+        default, ``False``) an order that may still fill is never sent again.
+        """
+        return False
 
     def startup_entitlement_warnings(self, canonical_symbols: list[str]) -> list[str]:
         """Return warnings for symbols this broker cannot trade (startup check only).

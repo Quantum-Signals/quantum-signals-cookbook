@@ -68,7 +68,8 @@ contracts and `None` conventions):
 | `connect()` / `disconnect()` | Lifecycle |
 | `resolve_contract(qs_symbol) -> contract \| None` | QS symbol → opaque broker contract (`None` = not tradable, skip) |
 | `get_last_price(contract) -> float \| None` | Latest price |
-| `place_order(contract, action, qty, price=None, position_intent=None) -> OrderResult \| None` | Submit; `None` = rejected |
+| `place_order(contract, action, qty, price=None, position_intent=None) -> OrderResult \| None` | Submit; `None` = failed. Set `last_order_not_placed = True` when the order was definitely refused: only then is a failed close retried |
+| `cancel_working_orders() -> bool` | Optional. Cancel all working orders; `True` only if the broker confirms none is left. Without it, a close with an unknown outcome is never resent |
 | `get_account_summary() -> dict` | NLV, PnL, buying power |
 | `get_open_positions()` / `get_positions_for_sync() -> list[dict]` | Positions (the latter with signed qty) |
 
