@@ -16,6 +16,10 @@ from .settings import AlpacaSettings
 # ``report_once`` every 300s). Default (connect, read) seconds for all requests.
 _DEFAULT_ALPACA_HTTP_TIMEOUT: tuple[float, float] = (10.0, 60.0)
 
+# How long to wait for cancelled orders to leave the book.
+_CANCEL_POLLS = 10
+_CANCEL_POLL_S = 0.5
+
 
 def _install_default_request_timeout(rest_client: object, timeout: tuple[float, float]) -> None:
     """Ensure ``session.request(..., timeout=...)`` so hung sockets cannot block indefinitely."""
@@ -271,6 +275,7 @@ class AlpacaBroker(BrokerBase):
                             f"to close — not retrying {action.upper()} {qty}x"
                         )
                         _log_alpaca_order_hint(msg, ticker)
+                        self.last_order_not_placed = True
                         return None
                     if retry_qty > cap + 1e-9:
                         logger.warning(
@@ -293,10 +298,12 @@ class AlpacaBroker(BrokerBase):
                         f"[Alpaca] Order submission failed for {ticker}: {retry_exc}"
                     )
                     _log_alpaca_order_hint(msg, ticker)
+                    self.last_order_not_placed = _is_refusal(retry_exc)
                     return None
             else:
                 logger.error(f"[Alpaca] Order submission failed for {ticker}: {exc}")
                 _log_alpaca_order_hint(msg, ticker)
+                self.last_order_not_placed = _is_refusal(exc)
                 return None
 
         logger.debug(
@@ -337,6 +344,22 @@ class AlpacaBroker(BrokerBase):
             status=str(order.status),
             raw=order,
         )
+
+    def cancel_working_orders(self) -> bool:
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        request = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        working = self._trading_client.get_orders(request)
+        if not working:
+            return True
+        logger.warning(f"[Alpaca] Cancelling {len(working)} working order(s)")
+        self._trading_client.cancel_orders()
+        for _ in range(_CANCEL_POLLS):
+            time.sleep(_CANCEL_POLL_S)
+            if not self._trading_client.get_orders(request):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Account & positions
@@ -439,6 +462,18 @@ def _intent_mismatch_retry_intent(msg: str, side: object) -> object | None:
         (OrderSide.SELL, "sell_to_open"): PositionIntent.SELL_TO_OPEN,
     }
     return mapping.get((side, inferred))
+
+
+def _is_refusal(exc: Exception) -> bool:
+    """Whether Alpaca answered that it did not take the order.
+
+    Only a 4xx answer is certain. After a timeout, a dropped connection or a 5xx
+    the order may be in. So may it after 408 (timeout) and 409 (conflict).
+    """
+    from alpaca.common.exceptions import APIError
+
+    status = exc.status_code if isinstance(exc, APIError) else None
+    return status is not None and 400 <= status < 500 and status not in (408, 409)
 
 
 def _log_alpaca_order_hint(msg: str, ticker: str) -> None:

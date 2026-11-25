@@ -14,3 +14,5 @@ services:
       - ./logs:/app/logs
 
     restart: unless-stopped
+    # Time to close positions on `docker compose stop` (Docker allows 10 s by default).
+    stop_grace_period: 3m

@@ -100,6 +100,9 @@ class SimulatedBroker(BrokerBase):
             self._prices[contract.symbol] = base
         return round(base, 2)
 
+    def cancel_working_orders(self) -> bool:
+        return True  # simulated orders fill at once
+
     def place_order(
         self,
         contract: SimContract,
@@ -121,6 +124,7 @@ class SimulatedBroker(BrokerBase):
                     f"[SIM] REJECTED {symbol}: insufficient long qty "
                     f"(requested: {qty}, available: {long_avail})"
                 )
+                self.last_order_not_placed = True
                 return None
 
         # Mimic Alpaca error 42210000: fractional orders cannot be sold short.
@@ -134,6 +138,7 @@ class SimulatedBroker(BrokerBase):
                     '{"code":42210000,"message":"fractional orders cannot be sold short"} '
                     f"(cur={cur_pos}, qty={qty}, resulting={resulting_pos})"
                 )
+                self.last_order_not_placed = True
                 return None
 
         order = {

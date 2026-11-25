@@ -571,14 +571,19 @@ def _report_minimal(broker: BrokerBase, perf: PerformanceTracker) -> None:
         logger.warning(f"Reporting error: {exc}")
 
 
+def describe_open(still_open: Optional[dict[str, float]]) -> str:
+    """*still_open*: signed qty by symbol, ``None`` if unknown."""
+    if still_open is None:
+        return "positions could not be read"
+    return ", ".join(f"{sym} {qty:+g}" for sym, qty in sorted(still_open.items()))
+
+
 def _unrealized_now_line(still_open: Optional[dict[str, float]]) -> str:
-    """*still_open*: signed qty by symbol after the close, ``None`` if unknown."""
     head = "  Unrealized now            : "
     if still_open is None:
         return f"{head}unknown  (could not confirm the account is flat)"
     if still_open:
-        left = ", ".join(f"{sym} {qty:+g}" for sym, qty in sorted(still_open.items()))
-        return f"{head}still open  ({left})"
+        return f"{head}still open  ({describe_open(still_open)})"
     return f"{head}$0.00  (flat — we close everything at session end)"
 
 

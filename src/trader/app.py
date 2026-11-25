@@ -2,22 +2,23 @@ from __future__ import annotations
 
 import os
 import queue
-import signal as os_signal
 import sys
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from loguru import logger
 from quantumsignals.client import Client as QSClient
 from trader.access_control import run_startup_access_checks
+from trader import market_calendar
 from trader.config import Settings, load_settings
-from qs_trader_broker_core import OrderResult
+from trader.closing import END_OF_DAY, STOPPING, PositionCloser, StopGuard
+from trader.signal_windows import SignalWindows
 from trader.brokers import BrokerBase, create_broker
 from trader.models import PerformanceTracker
 from trader.reporting import (
+    describe_open,
     report_once,
     format_day_summary,
     ReportContext,
@@ -27,6 +28,9 @@ from trader.reporting import (
 from trader.strategy.base import StrategyBase
 from trader.strategy.momentum import MomentumStrategy
 from trader.streaming import stream_signals_thread
+
+# Seconds before trying again to flatten, to exit an instrument or to read its times.
+_RETRY_S = 60.0
 
 # Add future strategies here: TRADER_STRATEGY=<name> → StrategyBase subclass.
 _STRATEGIES: dict[str, type[StrategyBase]] = {
@@ -100,35 +104,41 @@ def _at_time_on(d: date, hhmm: str, tz: ZoneInfo) -> datetime:
     return datetime.combine(d, dt_time(h, m), tzinfo=tz)
 
 
-def _next_weekday(d: date) -> date:
-    """Return the next Mon–Fri after ``d`` (handles weekends; no holiday calendar)."""
-    d = d + timedelta(days=1)
-    while d.weekday() >= 5:  # 5=Sat, 6=Sun
-        d += timedelta(days=1)
-    return d
+def _session_on(d: date, settings: Settings, tz: ZoneInfo) -> tuple[datetime, datetime] | None:
+    """The (start, end) of the session on *d*, or ``None`` when there is none.
 
-
-def _is_weekday(d: date) -> bool:
-    return d.weekday() < 5
+    On a US half day the session ends early, while the market is still open.
+    """
+    if d.weekday() >= 5:  # 5=Sat, 6=Sun
+        return None
+    start = _at_time_on(d, settings.session_start_time, tz)
+    end = _at_time_on(d, settings.session_end_time, tz)
+    if settings.us_market_calendar:
+        if market_calendar.is_holiday(d):
+            return None
+        early = market_calendar.early_close(d)
+        if early is not None and early < end:
+            end = early.astimezone(tz)
+    return (start, end) if start < end else None
 
 
 def _compute_next_session_window(now: datetime, settings: Settings) -> tuple[datetime, datetime]:
     """Decide which trading day we should aim for and return its (start, end).
 
     Rules:
-      - If ``now`` is on a weekday and before today's session_end_time → use today.
-      - Otherwise → fast-forward to the next weekday.
+      - If today has a session that has not ended yet → use today.
+      - Otherwise → fast-forward to the next day that has one.
     """
-    today = now.date()
-    today_end = _at_time_on(today, settings.session_end_time, now.tzinfo)
-    if _is_weekday(today) and now < today_end:
-        target = today
-    else:
-        target = _next_weekday(today)
-
-    start = _at_time_on(target, settings.session_start_time, now.tzinfo)
-    end = _at_time_on(target, settings.session_end_time, now.tzinfo)
-    return start, end
+    d = now.date()
+    for _ in range(15):  # longer than any run of weekends and holidays
+        window = _session_on(d, settings, now.tzinfo)
+        if window is not None and now < window[1]:
+            return window
+        d += timedelta(days=1)
+    raise ValueError(
+        f"No trading session in the next 15 days: check TRADER_SESSION_START_TIME="
+        f"{settings.session_start_time} and TRADER_SESSION_END_TIME={settings.session_end_time}"
+    )
 
 
 def _sleep_until(
@@ -136,8 +146,12 @@ def _sleep_until(
     stop_event: threading.Event,
     signal_queue: queue.Queue,
     poll_s: float = 5.0,
+    idle_task: Callable[[], bool] | None = None,
+    idle_every_s: float = 900.0,
 ) -> bool:
     """Sleep (interruptibly) until ``target`` while draining the signal queue.
+
+    ``idle_task`` runs every ``idle_every_s`` until it returns True.
 
     Returns True if the target was reached, False if interrupted via stop_event.
     Discarding off-hours signals keeps the queue bounded overnight.
@@ -145,6 +159,7 @@ def _sleep_until(
     tz = target.tzinfo
     discarded = 0
     next_status = time.monotonic() + 600.0  # log a heartbeat every 10 min
+    next_task = time.monotonic() + idle_every_s
     while not stop_event.is_set():
         now = datetime.now(tz)
         if now >= target:
@@ -169,6 +184,11 @@ def _sleep_until(
                 f"({_humanise_timedelta(remaining)} remaining)"
             )
             next_status = time.monotonic() + 600.0
+
+        if idle_task is not None and time.monotonic() >= next_task:
+            if idle_task():
+                idle_task = None
+            next_task = time.monotonic() + idle_every_s
 
         time.sleep(poll_s)
     return False
@@ -210,227 +230,16 @@ def _log_signal_catalog(settings: Settings) -> None:
         logger.warning(f"Could not fetch signal catalog: {exc}")
 
 
-class _InterruptGuard:
-    """Keep a repeated Ctrl-C from aborting the closing of positions.
-
-    The first SIGINT raises ``KeyboardInterrupt`` as usual. From then on (or
-    while ``closing()`` is active at end of day) further SIGINTs only print a
-    notice, because interrupting the close would leave positions open.
-    ``FORCE_QUIT_PRESSES`` further ones still abort, as an escape hatch.
-
-    The switch happens inside the handler, so there is no gap between the first
-    Ctrl-C and the shutdown code in which a second one could get through.
-    """
-
-    FORCE_QUIT_PRESSES = 5
-
-    def __init__(self, stop_event: threading.Event) -> None:
-        self._stop_event = stop_event
-        self._closing = False
-        self._extra = 0
-        self._previous: object = None
-        self._installed = False
-
-    def install(self) -> None:
-        # Python only allows signal handlers in the main thread.
-        if threading.current_thread() is threading.main_thread():
-            self._previous = os_signal.signal(os_signal.SIGINT, self._handle)
-            self._installed = True
-
-    def uninstall(self) -> None:
-        if self._installed:
-            os_signal.signal(os_signal.SIGINT, self._previous)
-            self._installed = False
-
-    @contextmanager
-    def closing(self) -> Iterator[None]:
-        """Hold back Ctrl-C during the block; it then stops the run afterwards."""
-        before, self._closing = self._closing, True
-        try:
-            yield
-        finally:
-            self._closing = before
-
-    def _handle(self, signum: int, frame: object) -> None:
-        if not self._closing:
-            self._closing = True
-            raise KeyboardInterrupt
-        self._stop_event.set()
-        self._extra += 1
-        if self._extra >= self.FORCE_QUIT_PRESSES:
-            raise KeyboardInterrupt
-        left = self.FORCE_QUIT_PRESSES - self._extra
-        # os.write, not the logger: the signal may land while its lock is held.
-        os.write(
-            2,
-            f"\nClosing positions, please wait. Press Ctrl-C {left} more time(s) to "
-            f"force quit and LEAVE POSITIONS OPEN.\n".encode(),
-        )
-
-
-_CLOSE_ROUNDS = 3  # order attempts per position
-_CLOSE_READ_TRIES = 3  # position-read attempts
-_CLOSE_SETTLE_POLLS = 5  # re-reads while waiting for closing fills to show
-_CLOSE_WAIT_S = 2.0
-_FLAT_QTY = 1e-9
-
-
-def _read_positions(broker: BrokerBase) -> dict[str, dict] | None:
-    """Non-flat broker positions by symbol, or ``None`` when they cannot be read."""
-    for attempt in range(1, _CLOSE_READ_TRIES + 1):
-        try:
-            rows = broker.get_positions_for_sync()
-            return {p["symbol"]: p for p in rows if abs(float(p["qty"])) >= _FLAT_QTY}
-        except Exception as exc:
-            logger.warning(f"Reading positions failed ({attempt}/{_CLOSE_READ_TRIES}): {exc}")
-            if attempt < _CLOSE_READ_TRIES:
-                time.sleep(_CLOSE_WAIT_S)
-    return None
-
-
-def _send_close(broker: BrokerBase, sym: str, qty: float) -> tuple[object, OrderResult | None, bool]:
-    """Send one closing order. Returns ``(contract, result, retryable)``."""
-    try:
-        contract = broker.resolve_contract(sym)
-    except Exception as exc:
-        logger.error(f"  -> Resolving {sym} failed: {exc}")
-        return None, None, True
-    if contract is None:
-        logger.error(f"  -> Cannot resolve contract for {sym} — manual close required")
-        return None, None, False
-    try:
-        trade = broker.place_order(contract, "SELL" if qty > 0 else "BUY", abs(qty))
-    except Exception as exc:
-        logger.error(f"  -> Close order for {sym} raised: {exc}")
-        trade = None
-    return contract, trade, True
-
-
-def _close_all_positions(
-    broker: BrokerBase,
-    settings: Settings,
-    perf: PerformanceTracker,
-) -> tuple[float, dict[str, float] | None]:
-    """Flatten every open position, checking the result against the broker.
-
-    A position counts as closed (and is recorded in *perf*) only when the
-    broker no longer reports it. Failed orders are retried for what is still
-    open. An accepted order that has not shown up yet is never sent again,
-    since it could fill twice and flip the position.
-
-    Returns ``(exit_pnl, still_open)``: the dollar PnL realised, and signed
-    quantities left open by symbol. ``None`` means positions could not be read,
-    so what is open is unknown.
-    """
-    from trader.models import Signal
-
-    exit_pnl = 0.0
-    positions = _read_positions(broker)
-    if positions is None:
-        logger.critical(
-            "POSITIONS NOT CLOSED: the broker's positions could not be read. "
-            "Check the account and close them by hand."
-        )
-        return 0.0, None
-    if not positions:
-        logger.info("No open positions to close")
-        return 0.0, {}
-
-    logger.warning(f"CLOSE: flattening {len(positions)} open position(s)…")
-    todo = dict(positions)
-    still_open = {sym: float(p["qty"]) for sym, p in positions.items()}
-
-    for round_no in range(1, _CLOSE_ROUNDS + 1):
-        sent: dict[str, tuple[object, OrderResult | None, bool]] = {}
-        for sym, p in todo.items():
-            qty = float(p["qty"])
-            label = "LONG" if qty > 0 else "SHORT"
-            logger.warning(f"  {label} {abs(qty):g}x {sym} @ {p['avg_price']:.2f}")
-            sent[sym] = _send_close(broker, sym, qty)
-
-        # Positions can lag a fill: re-read until everything sent is gone.
-        after = None
-        for poll in range(_CLOSE_SETTLE_POLLS):
-            after = _read_positions(broker)
-            if after is None or not any(s in after for s, (_, t, _r) in sent.items() if t):
-                break
-            if poll < _CLOSE_SETTLE_POLLS - 1:
-                time.sleep(_CLOSE_WAIT_S)
-
-        retry: dict[str, dict] = {}
-        for sym, (contract, trade, retryable) in sent.items():
-            p = todo[sym]
-            qty = float(p["qty"])
-            label = "LONG" if qty > 0 else "SHORT"
-            if after is None:
-                # Cannot check: believe only an order the broker called filled.
-                filled = trade is not None and str(trade.status).lower() == "filled"
-                left = 0.0 if filled else qty
-            else:
-                left = float(after[sym]["qty"]) if sym in after else 0.0
-
-            flipped = left * qty < 0
-            closed = qty if flipped else qty - left
-            if closed * qty > 0 and abs(closed) >= _FLAT_QTY:
-                exit_pnl += _record_exit(
-                    broker, settings, perf, sym, contract, trade, closed, float(p["avg_price"]), Signal
-                )
-            if abs(left) < _FLAT_QTY:
-                still_open.pop(sym, None)
-                continue
-
-            still_open[sym] = left
-            if flipped:
-                logger.critical(f"  -> {sym} is now {left:+g}, on the other side — check the account")
-            elif trade is not None:
-                logger.error(
-                    f"  -> Close order for {sym} was accepted but {left:+g} is still open; "
-                    f"not sending it again (it may still fill)"
-                )
-            else:
-                logger.error(f"  -> {label} {abs(left):g}x {sym} NOT closed: the order failed")
-                if retryable and after is not None:
-                    retry[sym] = after[sym]
-
-        if after is None:
-            logger.critical("Positions could not be re-read after the closing orders")
-        if not retry or round_no == _CLOSE_ROUNDS:
-            break
-        logger.warning(f"Retrying {len(retry)} failed close(s) ({round_no + 1}/{_CLOSE_ROUNDS})…")
-        time.sleep(_CLOSE_WAIT_S)
-        todo = retry
-
-    if after is None:
-        return exit_pnl, still_open or None
-    return exit_pnl, still_open
-
-
-def _record_exit(
-    broker: BrokerBase,
-    settings: Settings,
-    perf: PerformanceTracker,
-    sym: str,
-    contract: object,
-    trade: OrderResult | None,
-    qty: float,
-    avg_price: float,
-    signal_cls: type,
-) -> float:
-    """Book the PnL of *qty* (signed) that is confirmed closed."""
-    label = "LONG" if qty > 0 else "SHORT"
-    fill_price = trade.price if trade else None
-    if fill_price is None and contract is not None:
-        try:
-            fill_price = broker.get_last_price(contract)
-        except Exception as exc:
-            logger.warning(f"  -> No price for {sym}: {exc}")
-    if fill_price is None:
-        logger.info(f"  -> Closed {label} {abs(qty):g}x {sym} (fill price unavailable)")
-        return 0.0
-    pnl = (fill_price - avg_price) * qty * settings.contract_multipliers.get(sym, 1.0)
-    perf.record_close(sym, pnl, signal_cls.UP if qty > 0 else signal_cls.DOWN)
-    logger.info(f"  -> Closed {label} {abs(qty):g}x {sym} @ {fill_price:.2f}  PnL=${pnl:+,.2f}")
-    return pnl
+def _wait_until_flat(
+    closer: PositionCloser, eod_dt: datetime, stop_event: threading.Event, signal_queue: queue.Queue
+) -> bool:
+    """Hold back trading until earlier positions are closed. False if the session ended first."""
+    while not closer.close_leftovers():
+        logger.critical("NOT TRADING: the account is not flat")
+        retry_at = min(datetime.now(eod_dt.tzinfo) + timedelta(seconds=_RETRY_S), eod_dt)
+        if not _sleep_until(retry_at, stop_event, signal_queue) or retry_at == eod_dt:
+            return False
+    return True
 
 
 def _run_trading_day(
@@ -442,8 +251,12 @@ def _run_trading_day(
     settings: Settings,
     stop_event: threading.Event,
     signal_queue: queue.Queue,
+    check_exits: Callable[[datetime], bool] | None = None,
 ) -> bool:
     """Run the intraday event loop until EOD or until stop_event is set.
+
+    ``check_exits`` closes the instruments whose published exit time has come,
+    and returns False when it has to be tried again.
 
     Returns True if the loop exited because EOD was reached, False if it was
     interrupted (e.g. Ctrl-C, fatal stream error).
@@ -459,6 +272,7 @@ def _run_trading_day(
     poll_s = 0.05
     next_report_mono = time.monotonic() + report_interval_s if use_time_based_reports else float('inf')
     next_tick_at = time.monotonic()
+    next_exit_check = time.monotonic()
 
     # Track trade count to detect when trades occur (for on-trade reporting)
     last_trade_count = perf.total_trades
@@ -509,6 +323,8 @@ def _run_trading_day(
                 item = signal_queue.get_nowait()
                 if item is None:
                     break
+                if datetime.now(tz) >= eod_dt:
+                    break  # e.g. after the computer slept: never open past the session end
                 try:
                     strategy.handle_signal(item)
                 except Exception as exc:
@@ -526,6 +342,14 @@ def _run_trading_day(
             except Exception as exc:
                 logger.exception(f"Strategy tick error: {exc}")
             next_tick_at = now_mono + tick_interval_s
+
+        if check_exits is not None and now_mono >= next_exit_check:
+            done = False
+            try:
+                done = check_exits(eod_dt)
+            except Exception as exc:
+                logger.exception(f"Exit-time check failed: {exc}")
+            next_exit_check = time.monotonic() + (tick_interval_s if done else _RETRY_S)
 
         # Check if we should show the account info panel
         should_report = False
@@ -648,17 +472,16 @@ def _flatten_and_summarize(
     broker: BrokerBase,
     perf: PerformanceTracker,
     settings: Settings,
-) -> tuple[float, float]:
-    """Snapshot, flatten if configured, log the day summary.
-
-    Returns ``(intraday_pnl, exit_pnl)``.
-    """
+    closer: PositionCloser,
+    waits: Sequence[float] = STOPPING,
+) -> None:
+    """Snapshot, flatten if configured, log the day summary."""
     snapshot = _snapshot_pre_close(broker)
     intraday_pnl = perf.gross_pnl
     intraday_closes = perf.total_trades
     exit_pnl = 0.0
     if settings.close_on_exit:
-        exit_pnl, still_open = _close_all_positions(broker, settings, perf)
+        exit_pnl, still_open = closer.close_all(perf, waits)
     elif snapshot["positions_known"]:
         still_open = {p["symbol"]: float(p["qty"]) for p in snapshot["positions"]}
     else:
@@ -671,9 +494,7 @@ def _flatten_and_summarize(
     if settings.close_on_exit and still_open is None:
         logger.critical("Could not confirm the account is flat — check it and close by hand")
     elif settings.close_on_exit and still_open:
-        left = ", ".join(f"{sym} {qty:+g}" for sym, qty in sorted(still_open.items()))
-        logger.critical(f"STILL OPEN at the broker: {left} — close by hand")
-    return intraday_pnl, exit_pnl
+        logger.critical(f"STILL OPEN at the broker: {describe_open(still_open)} — close by hand")
 
 
 def _log_day_summary(
@@ -790,29 +611,48 @@ def main() -> None:
         )
         _close_day_log(day_log_id)
         sys.exit(1)
-    strategy = strategy_cls(broker, perf, settings)
-    strategy.sync_positions()
-
-    qs_thread = threading.Thread(
-        target=stream_signals_thread,
-        args=(settings, stop_event, signal_queue),
-        name="qs-stream",
-        daemon=True,
-    )
-    qs_thread.start()
-    logger.info("QuantumSignals stream thread started")
-
     days_completed = 0
     cumulative_pnl = 0.0
     cumulative_trades = 0
     cumulative_wins = 0
     cumulative_losses = 0
-    shutdown_reason = "manual (Ctrl-C)"
+    shutdown_reason = "stream stopped"
 
-    guard = _InterruptGuard(stop_event)
-    logger.info("Bot running. Press Ctrl-C to stop.")
+    guard = StopGuard(stop_event)
+    closer = PositionCloser(broker, settings, guard)
     try:
         guard.install()
+        # A crash, a power cut or a forced kill cannot close anything, so the
+        # next start does. Not flat yet (e.g. market closed)? It is tried again
+        # while waiting, and no trading starts before it succeeded.
+        if settings.flatten_on_start:
+            closer.close_leftovers()
+
+        windows = SignalWindows(settings) if settings.follow_signal_windows else None
+        strategy = strategy_cls(broker, perf, settings, windows=windows)
+        strategy.sync_positions()
+
+        def check_exits(eod_dt: datetime) -> bool:
+            if not (windows.loaded or windows.load()):
+                return False
+            due = windows.due_exits(datetime.now(tz), eod_dt) if settings.close_on_exit else set()
+            if not due:
+                return True
+            flat = closer.close_instruments(due, perf)
+            windows.mark_exited(flat)
+            strategy.sync_positions()
+            return flat == due
+
+        qs_thread = threading.Thread(
+            target=stream_signals_thread,
+            args=(settings, stop_event, signal_queue),
+            name="qs-stream",
+            daemon=True,
+        )
+        qs_thread.start()
+        logger.info("QuantumSignals stream thread started")
+        logger.info("Bot running. Press Ctrl-C to stop.")
+
         while not stop_event.is_set():
             now = datetime.now(tz)
             session_start, eod_dt = _compute_next_session_window(now, settings)
@@ -831,7 +671,8 @@ def main() -> None:
                     f"{session_start.strftime('%Y-%m-%d %H:%M %Z')} "
                     f"({_humanise_timedelta(session_start - now)} from now)…"
                 )
-                if not _sleep_until(session_start, stop_event, signal_queue):
+                retry = closer.close_leftovers if settings.close_on_exit and not closer.flat else None
+                if not _sleep_until(session_start, stop_event, signal_queue, idle_task=retry):
                     break
 
             logger.info("=" * 60)
@@ -840,6 +681,10 @@ def main() -> None:
                 f"(session ends at {eod_dt.strftime('%H:%M %Z')})"
             )
             logger.info("=" * 60)
+
+            can_trade = not settings.flatten_on_start or _wait_until_flat(
+                closer, eod_dt, stop_event, signal_queue
+            )
 
             # Re-sync from the broker right before the session starts: positions
             # can change between process start and the actual open (EOD orders
@@ -851,12 +696,22 @@ def main() -> None:
             except Exception as exc:
                 logger.warning(f"Pre-session position re-sync failed: {exc}")
 
-            reached_eod = _run_trading_day(
-                eod_dt, tz, broker, strategy, perf, settings, stop_event, signal_queue
-            )
+            if windows is not None:
+                windows.start_day(session_start)
+
+            closer.flat = False
+            if can_trade:
+                reached_eod = _run_trading_day(
+                    eod_dt, tz, broker, strategy, perf, settings, stop_event, signal_queue,
+                    check_exits if windows is not None else None,
+                )
+            else:
+                reached_eod = not stop_event.is_set()
 
             with guard.closing():
-                _flatten_and_summarize(trading_day, broker, perf, settings)
+                _flatten_and_summarize(
+                    trading_day, broker, perf, settings, closer, END_OF_DAY if reached_eod else STOPPING
+                )
 
             cumulative_pnl += perf.gross_pnl
             cumulative_trades += perf.total_trades
@@ -876,20 +731,33 @@ def main() -> None:
                 logger.info(shutdown_reason)
                 break
 
+        if guard.stopped_by:
+            shutdown_reason = f"manual ({guard.stopped_by})"
+        if settings.close_on_exit and not closer.flat:
+            closer.close_leftovers()
+
     except KeyboardInterrupt:
-        logger.info("Ctrl-C received — shutting down…")
-        shutdown_reason = "manual (Ctrl-C)"
+        stopped_by = guard.stopped_by or "Ctrl-C"
+        logger.info(f"{stopped_by} received — shutting down…")
+        shutdown_reason = f"manual ({stopped_by})"
 
         # Always attempt to flatten on shutdown when close_on_exit is enabled,
         # regardless of whether *perf* has any closed trades. Open positions
         # accumulated this run (or carried over from a previous run) must not
         # be left at the broker.
-        _flatten_and_summarize(datetime.now(tz).date(), broker, perf, settings)
+        _flatten_and_summarize(datetime.now(tz).date(), broker, perf, settings, closer)
         cumulative_pnl += perf.gross_pnl
         cumulative_trades += perf.total_trades
         cumulative_wins += perf.winning_trades
         cumulative_losses += perf.losing_trades
         days_completed += 1
+    except Exception as exc:
+        logger.exception(f"Unexpected error — closing positions and stopping: {exc}")
+        shutdown_reason = f"error ({type(exc).__name__}: {exc})"
+        if not closer.flat:
+            with guard.closing():
+                _flatten_and_summarize(datetime.now(tz).date(), broker, perf, settings, closer)
+        raise
     finally:
         stop_event.set()
         _log_overall_summary(
