@@ -73,7 +73,8 @@ ls logs/session_$(date +%Y-%m-%d)_*.log
 docker compose stop
 ```
 
-If `TRADER_CLOSE_ON_EXIT=true` (the default), all open positions are automatically flattened on shutdown.
+If `TRADER_CLOSE_ON_EXIT=true` (the default), the bot cancels working orders and closes **every position in
+the account**, including ones it did not open, whenever it stops. See [Ending every day flat](#ending-every-day-flat).
 
 ---
 
@@ -119,6 +120,9 @@ Alpaca credentials are required only when `TRADER_BROKER=alpaca`:
 | Variable | Default | Description |
 |---|---|---|
 | `TRADER_CLOSE_ON_EXIT` | `true` | Flatten all open positions when the bot stops |
+| `TRADER_CLOSE_ON_START` | same as `TRADER_CLOSE_ON_EXIT` | Flatten positions left by an earlier session before trading |
+| `TRADER_FOLLOW_SIGNAL_WINDOWS` | `true` | Trade each symbol only inside its signal's published entry window and close it at its exit time |
+| `TRADER_US_MARKET_CALENDAR` | `true` | Skip US market holidays; end the session at 12:55 New York on half days |
 | `TRADER_DAILY_START_CAPITAL` | `100000` | Splits this notional across active symbols for order sizing (used when `TRADER_SYMBOL_CAPITAL` is not set) |
 | `TRADER_SYMBOL_CAPITAL` | *(empty)* | Per-symbol capital allocation (e.g. `ES:60000,NQ:40000`). Overrides equal split of `TRADER_DAILY_START_CAPITAL` |
 | `TRADER_SIGNAL_QUEUE_MAXSIZE` | `0` | Max buffered signals (`0` = unlimited) |
@@ -163,6 +167,25 @@ per-day counters, sleeps over the night/weekend, and resumes when the next
 weekday's session start arrives. A cumulative run summary is printed when you
 finally stop the bot (Ctrl-C).
 
+#### Ending every day flat
+
+With `TRADER_CLOSE_ON_EXIT=true`:
+
+| What happens | What the bot does |
+|---|---|
+| Session end | Cancels working orders, closes everything and checks with the broker. Not flat: tries again every minute for 10 minutes, then every 15 minutes while idle |
+| Ctrl-C, `docker compose stop`, `kill`, closed terminal, crash, lost signal stream | Closes everything, then exits. A second Ctrl-C does not interrupt it; five more force quit |
+| Forced kill (`kill -9`), power cut | Nothing can run, so the **next start** closes what was left, before trading |
+| Computer asleep at session end | Closes as soon as it wakes; signals received late are not traded |
+| US holiday / half day | No session / ends at 12:55 New York, while the market is open |
+
+Trading does not start until the broker confirms the account is flat, so a restart in the middle of a session
+also closes that session's positions. If the bot still cannot close something, it logs `STILL OPEN at the broker`:
+check for working orders, then close it by hand.
+
+An order whose outcome is unknown (timeout, dropped connection) is sent again only if the broker can confirm that
+no order is still working; otherwise it could fill twice and reverse the position.
+
 Each trading day gets its **own log file** under `logs/`, named
 `session_<YYYY-MM-DD>_<HH-MM-SS>.log` where the `HH-MM-SS` suffix is the
 **process start time**. Overnight idle messages between two sessions land in
@@ -179,9 +202,21 @@ the *upcoming* day's file.
 | `TRADER_SESSION_TIMEZONE`   | `America/New_York` | Timezone for the times above |
 | `TRADER_RUN_DAYS`           | `0` | `0` = run indefinitely; `1` = exit after first EOD (legacy single-day behaviour); `N` = exit after N EODs |
 
-Weekends are skipped automatically. US holidays are **not** detected — on a
-holiday the bot wakes up normally but the QS stream simply produces no
-actionable signals, so the day passes with an empty summary.
+#### Entry and exit times
+
+Each signal publishes how it is traded in its backtest: an entry window and an exit time (for example gold
+opens 09:30–09:50 and exits at 13:25 New York). The stream does not enforce them, so the bot does: it trades a
+symbol only inside the entry window (end excluded), then holds, and closes it at the exit time, retrying every
+minute until it is flat. The times are read from the QuantumSignals catalog at each session start and logged as
+`[windows]`. If they cannot be read, the last known ones apply; without any, the bot trades the whole session as
+if this were off, and tries to read them again every minute.
+
+An entry window can be shorter than `TRADER_EXECUTION_INTERVAL_MINUTES`; the bot then takes at most one decision in
+it, and a STABLE signal counts as that decision. Exit times need `TRADER_CLOSE_ON_EXIT=true`.
+
+Weekends and US market holidays are skipped automatically, and half days end
+early (turn this off with `TRADER_US_MARKET_CALENDAR=false`). One-off closures
+are not detected.
 
 ---
 

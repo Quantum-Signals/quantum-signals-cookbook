@@ -571,6 +571,22 @@ def _report_minimal(broker: BrokerBase, perf: PerformanceTracker) -> None:
         logger.warning(f"Reporting error: {exc}")
 
 
+def describe_open(still_open: Optional[dict[str, float]]) -> str:
+    """*still_open*: signed qty by symbol, ``None`` if unknown."""
+    if still_open is None:
+        return "positions could not be read"
+    return ", ".join(f"{sym} {qty:+g}" for sym, qty in sorted(still_open.items()))
+
+
+def _unrealized_now_line(still_open: Optional[dict[str, float]]) -> str:
+    head = "  Unrealized now            : "
+    if still_open is None:
+        return f"{head}unknown  (could not confirm the account is flat)"
+    if still_open:
+        return f"{head}still open  ({describe_open(still_open)})"
+    return f"{head}$0.00  (flat — we close everything at session end)"
+
+
 def format_day_summary(
     day: date,
     perf: PerformanceTracker,
@@ -584,7 +600,8 @@ def format_day_summary(
     """Build the end-of-day summary lines (no I/O).
 
     ``Trades`` / ``Closed`` is the number of positions that went flat — not
-    each order. Unrealized is $0 after flatten because nothing is left open;
+    each order. Unrealized is $0 after a confirmed flatten; otherwise the line
+    lists what *snapshot* says is still open;
     the pre-close mark-to-market lives on *snapshot*.
     """
     snapshot = snapshot or {}
@@ -667,8 +684,7 @@ def format_day_summary(
         "",
         "PNL",
         f"  Unrealized before flatten : {_format_currency(pre_unreal, show_sign=True)}",
-        "  Unrealized now            : $0.00  "
-        "(flat — we close everything at session end)",
+        _unrealized_now_line(snapshot.get("still_open", {})),
         in_session,
         f"  Realized on flatten       : {_format_currency(exit_pnl, show_sign=True)}",
         f"  Total day realized        : {_format_currency(total_pnl, show_sign=True)}",
@@ -691,6 +707,8 @@ def format_day_summary(
                 f"  {label:<5} {_format_qty(abs(qty)):>8} {p.get('symbol', '?')}  "
                 f"avg={avg:.2f}"
             )
+    elif not snapshot.get("positions_known", True):
+        lines.append("  (unknown — positions could not be read)")
     else:
         lines.append("  (already flat — nothing to close)")
 
