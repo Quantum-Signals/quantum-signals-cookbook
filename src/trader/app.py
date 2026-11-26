@@ -482,6 +482,10 @@ def _flatten_and_summarize(
     exit_pnl = 0.0
     if settings.close_on_exit:
         exit_pnl, still_open = closer.close_all(perf, waits)
+        try:
+            snapshot["net_liquidation_after"] = broker.get_account_summary().get("net_liquidation")
+        except Exception as exc:
+            logger.warning(f"EOD snapshot: account summary after the close failed: {exc}")
     elif snapshot["positions_known"]:
         still_open = {p["symbol"]: float(p["qty"]) for p in snapshot["positions"]}
     else:
@@ -617,6 +621,7 @@ def main() -> None:
     cumulative_wins = 0
     cumulative_losses = 0
     shutdown_reason = "stream stopped"
+    in_session = False  # a trading day has started and is not summarized yet
 
     guard = StopGuard(stop_event)
     closer = PositionCloser(broker, settings, guard)
@@ -681,6 +686,7 @@ def main() -> None:
                 f"(session ends at {eod_dt.strftime('%H:%M %Z')})"
             )
             logger.info("=" * 60)
+            in_session = True
 
             can_trade = not settings.flatten_on_start or _wait_until_flat(
                 closer, eod_dt, stop_event, signal_queue
@@ -718,6 +724,7 @@ def main() -> None:
             cumulative_wins += perf.winning_trades
             cumulative_losses += perf.losing_trades
             days_completed += 1
+            in_session = False
 
             if not reached_eod:
                 shutdown_reason = "stream/loop interrupted"
@@ -744,13 +751,17 @@ def main() -> None:
         # Always attempt to flatten on shutdown when close_on_exit is enabled,
         # regardless of whether *perf* has any closed trades. Open positions
         # accumulated this run (or carried over from a previous run) must not
-        # be left at the broker.
-        _flatten_and_summarize(datetime.now(tz).date(), broker, perf, settings, closer)
-        cumulative_pnl += perf.gross_pnl
-        cumulative_trades += perf.total_trades
-        cumulative_wins += perf.winning_trades
-        cumulative_losses += perf.losing_trades
-        days_completed += 1
+        # be left at the broker. Stopped between sessions, there is no day to
+        # summarize or count.
+        if in_session:
+            _flatten_and_summarize(trading_day, broker, perf, settings, closer)
+            cumulative_pnl += perf.gross_pnl
+            cumulative_trades += perf.total_trades
+            cumulative_wins += perf.winning_trades
+            cumulative_losses += perf.losing_trades
+            days_completed += 1
+        elif settings.close_on_exit:
+            closer.close_leftovers()
     except Exception as exc:
         logger.exception(f"Unexpected error — closing positions and stopping: {exc}")
         shutdown_reason = f"error ({type(exc).__name__}: {exc})"

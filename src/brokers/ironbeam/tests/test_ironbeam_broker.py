@@ -249,6 +249,8 @@ def test_contract_size_follows_the_symbol_list():
     assert (m["ES"], m["SPY"], m["MES"]) == ("MES", "MES", "MES")
     assert (m["NQ"], m["MNQ"], m["GC"]) == ("NQ", "NQ", "GC")
     assert _symbol_map_for("")["ES"] == "ES"
+    m = _symbol_map_for("MGC,SIL,CL")
+    assert (m["GC"], m["Gold"], m["SI"], m["CL"]) == ("MGC", "MGC", "SIL", "CL")
 
 
 def test_symbol_list_naming_both_sizes_is_refused():

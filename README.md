@@ -315,9 +315,10 @@ says. Repeated signals in one direction add a contract per interval per symbol,
 and each contract ties up margin. On a small account use a long interval
 (`TRADER_EXECUTION_INTERVAL_MINUTES=30`–`60`) and few symbols.
 The contract size is the one you name in `TRADER_ALLOWED_SYMBOLS`: `MES`,
-`MNQ`, `MYM` or `M2K` trade micros; `ES`, `NQ`, `YM`, `RTY` and any other name
-(`SPY`, `S&P500`, `GC`, …) trade full-size contracts, 10× larger, which only
-suit large accounts. An empty list trades every symbol full size. Naming both
+`MNQ`, `MYM`, `M2K`, `MCL`, `MGC` or `SIL` trade micros; `ES`, `NQ`, `YM`,
+`RTY`, `CL`, `GC`, `SI` and any other name (`SPY`, `S&P500`, `Gold`, …) trade
+full-size contracts, 10× larger (5× for silver), which only suit large
+accounts. Natural gas has no micro here. An empty list trades every symbol full size. Naming both
 sizes of one product (`ES,MES`) stops the bot at startup.
 
 **Order checks.** Ironbeam can reject an order without saying why, so the broker

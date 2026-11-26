@@ -94,7 +94,7 @@ def test_allowed_etf_or_future_name_accepts_other_aliases(instrument):
         assert is_symbol_allowed(alias, allowed)
 
 
-def test_ironbeam_map_uses_micros_by_default():
+def test_ironbeam_micro_map():
     m = ironbeam_symbol_map(use_micros=True)
     assert m["ES"] == m["SPY"] == m["S&P500"] == "MES"
     assert m["NQ"] == "MNQ"
@@ -118,3 +118,10 @@ def test_ironbeam_roots_map_back_to_canonical():
     ex = ironbeam_root_exchanges()
     assert ex["MYM"] == ex["YM"] == "XCBT"
     assert ex["MCL"] == "XNYM" and ex["SIL"] == "XCEC" and ex["MES"] == "XCME"
+
+
+@pytest.mark.parametrize("micro, canonical", [("MCL", "CL"), ("MGC", "GC"), ("SIL", "SI")])
+def test_energy_and_metal_micros_are_recognised(micro, canonical):
+    assert canonicalize(micro) == canonical
+    assert position_symbol_to_canonical(micro) == canonical
+    assert alpaca_symbol_map()[micro] == alpaca_symbol_map()[canonical]

@@ -256,7 +256,7 @@ QuantumSignals emits objects consumed by `handle_signal(signal)`.
 
 Defined in `qs_trader_symbols`. Each broker builds its tradable map from that catalog (see [brokers.md § Symbol maps](brokers.md#symbol-maps)).
 
-Ironbeam (`TRADER_BROKER=ironbeam`) trades the futures themselves, in the size named in `TRADER_ALLOWED_SYMBOLS`: `MES`, `MNQ`, `MYM`, `M2K` trade micros; `ES`, `NQ`, `YM`, `RTY`, `CL`, `GC`, `SI`, `NG` and other names trade full-size roots. Positions are keyed by root, so `contract_multipliers` (MES = 5, MCL = 100, …) apply directly. AAPL has no futures root and is skipped.
+Ironbeam (`TRADER_BROKER=ironbeam`) trades the futures themselves, in the size named in `TRADER_ALLOWED_SYMBOLS`: `MES`, `MNQ`, `MYM`, `M2K`, `MCL`, `MGC`, `SIL` trade micros; `ES`, `NQ`, `YM`, `RTY`, `CL`, `GC`, `SI`, `NG` and other names trade full-size roots. Positions are keyed by root, so `contract_multipliers` (MES = 5, MCL = 100, …) apply directly. AAPL has no futures root and is skipped.
 
 Set `TRADER_ALLOWED_SYMBOLS` using **any alias** for an instrument (`ES`, `SPY`, or `S&P500` all select the same product). Empty = allow the full catalog.
 
