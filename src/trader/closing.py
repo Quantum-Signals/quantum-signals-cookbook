@@ -279,6 +279,7 @@ class PositionCloser:
 
     def _book(self, symbol: str, order: _Order, qty: float, perf: PerformanceTracker) -> float:
         """Record the PnL of *qty* (signed) that is confirmed closed."""
+        perf.record_trade(symbol, "SELL" if qty > 0 else "COVER", abs(qty))
         price = order.result.price if order.result else None
         if price is None and order.contract is not None:
             try:

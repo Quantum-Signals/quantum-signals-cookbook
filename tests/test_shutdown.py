@@ -545,3 +545,46 @@ def test_alpaca_confirms_cancelled_orders(monkeypatch, left, confirmed):
     )
     assert b.cancel_working_orders() is confirmed
     assert bool(cancelled) is bool(left[0])
+
+
+# ---------------------------------------------------------------------------
+# Day summary
+# ---------------------------------------------------------------------------
+
+
+def _day_logs(tmp_path) -> str:
+    return "\n".join(f.read_text() for f in sorted((tmp_path / "logs").glob("*.log")))
+
+
+def test_ctrl_c_while_waiting_for_the_session_adds_no_day(monkeypatch, tmp_path):
+    def sleep_until(*a, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(app, "_sleep_until", sleep_until)
+    _run_main(monkeypatch, tmp_path, ScriptedBroker({}), None, starts_in=timedelta(minutes=30))
+    text = _day_logs(tmp_path)
+    assert "DAY SUMMARY" not in text and "Trading days completed : 0" in text
+
+
+def test_ctrl_c_during_the_session_summarizes_that_day(monkeypatch, tmp_path):
+    b = ScriptedBroker({})
+    _run_main(monkeypatch, tmp_path, b, _open_then(b, _ctrl_c))
+    text = _day_logs(tmp_path)
+    assert text.count("DAY SUMMARY") == 1 and "Trading days completed : 1" in text
+
+
+def test_summary_shows_the_account_value_before_and_after_the_close():
+    b = ScriptedBroker({"GLD": 15})
+    values = iter([1_000.0, 1_250.0])
+    real = b.get_account_summary
+    b.get_account_summary = lambda: {**real(), "net_liquidation": next(values)}
+    text = _summary(b)
+    assert "NLV before flatten        : $1,000" in text
+    assert "NLV after flatten         : $1,250" in text
+
+
+def test_closing_orders_are_counted_under_the_instrument():
+    b = ScriptedBroker({"SPY": -6})
+    _, left, perf = _close(b)
+    assert left == {} and perf.order_counts()["COVER"] == 6  # counted in contracts, like entries
+    assert list(perf.symbol_stats) == ["ES"]
