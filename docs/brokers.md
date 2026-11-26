@@ -101,7 +101,7 @@ that catalog:
 |-----|----------|---------|
 | `INSTRUMENTS` / `canonicalize()` | `qs_trader_symbols` | QS alias → canonical key (`ES`, `NQ`, …) |
 | `AlpacaBroker.DEFAULT_SYMBOL_MAP` | built via `alpaca_symbol_map()` | QS alias → tradable ETF/stock ticker |
-| `IronbeamBroker.DEFAULT_SYMBOL_MAP` | built via `ironbeam_symbol_map()` | QS alias → futures root (`ES`, or `MES` when `TRADER_ALLOWED_SYMBOLS` names `MES`); the contract month is resolved at runtime. AAPL is omitted |
+| `IronbeamBroker` symbol map | built at startup by `_symbol_map_for()` from `ironbeam_symbol_map()` and `TRADER_ALLOWED_SYMBOLS` | QS alias → futures root (`ES`, or `MES` when `TRADER_ALLOWED_SYMBOLS` names `MES`); the contract month is resolved at runtime. AAPL is omitted |
 | `SimulatedBroker.DEFAULT_SYMBOL_MAP` | built via `simulated_symbol_map()` | Dry-run contract shapes; `.DEFAULT_PRICES` seeds quotes |
 
 Each broker accepts an optional `symbol_map` (and the simulator, `sim_prices`)

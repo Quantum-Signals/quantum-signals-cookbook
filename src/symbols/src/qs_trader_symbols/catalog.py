@@ -268,7 +268,7 @@ def position_symbol_to_canonical(broker_symbol: str) -> str | None:
 
 
 def ironbeam_symbol_map(*, use_micros: bool) -> dict[str, str]:
-    """Build Ironbeam ``DEFAULT_SYMBOL_MAP`` (QS alias → futures product root).
+    """Build an Ironbeam symbol map (QS alias → futures product root).
 
     With *use_micros* the micro contract is used where one exists (``ES`` →
     ``MES``), falling back to the full-size root (natural gas has no micro

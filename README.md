@@ -321,6 +321,24 @@ full-size contracts, 10× larger (5× for silver), which only suit large
 accounts. Natural gas has no micro here. An empty list trades every symbol full size. Naming both
 sizes of one product (`ES,MES`) stops the bot at startup.
 
+**Delayed prices.** Without a market-data subscription, the demo account's
+quotes can be about 10 minutes old (seen on our demo account in November
+2026). The prices the bot logs for its orders then differ from the fills, and
+the unrealized PnL Ironbeam reports while positions are open can be off. Realized
+PnL comes from the fills and is right.
+
+**Order type.** Orders are market orders by default. With
+`IRONBEAM_USE_MARKET_ORDERS=false` they are limit orders at the last price; one
+not filled within `IRONBEAM_FILL_TIMEOUT_S` (10 s) stays working, so unfilled
+orders can add up between signals until the next close cancels them.
+`IRONBEAM_HTTP_TIMEOUT_S` (15 s) limits each request; placing an order always
+waits at least 35 s for Ironbeam's answer.
+
+**The whole account.** The bot treats the account as its own: at every close it
+cancels **all** working orders, including stops you placed by hand, and closes
+every position, including ones it did not open. Use a separate account for
+manual trading.
+
 **Order checks.** Ironbeam can reject an order without saying why, so the broker
 logs read-only checks (set `IRONBEAM_DIAGNOSTICS=false` to turn them off; they
 add about 1.5 s before an order and never block one). Search the log for:
@@ -333,7 +351,9 @@ add about 1.5 s before an order and never block one). Search the log for:
 | `AFTER REJECTION` | account state, all three margin tiers and the contract's session state |
 
 The expectation uses a rule inferred from demo rejections, not a documented one:
-maintenance margin after the order must stay under the start-of-day cash.
+maintenance margin after the order must stay under the start-of-day cash. It is
+an estimate: on 2026-11-25 an order it expected to be rejected was accepted.
+Nothing stops an order on the strength of it.
 
 ### Recommended progression
 
