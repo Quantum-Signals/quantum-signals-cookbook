@@ -247,8 +247,8 @@ CL (→ USO), GC (→ GLD), SI (→ SLV), NG (→ UNG), and AAPL. See
 `qs_trader_symbols.INSTRUMENTS` for the full alias list.
 
 Alpaca supports **equities and ETFs only** — futures names are mapped to correlated
-ETFs. Ironbeam trades the CME Group futures themselves, micros by default
-(`ES` → `MES`, `GC` → `MGC`, `SI` → `SIL`; the most-traded contract month is
+ETFs. Ironbeam trades the CME Group futures themselves, in the size you
+name in `TRADER_ALLOWED_SYMBOLS` (`MES` trades micros, `ES` full size; the most-traded contract month is
 resolved daily; see `ironbeam_symbol_map()`). See
 [docs/brokers.md](docs/brokers.md).
 
@@ -274,7 +274,7 @@ The bot has **two layers** of safety, applied in this order:
 
 ### Ironbeam (`TRADER_BROKER=ironbeam`)
 
-REST API v3, CME Group futures (micros by default) in **whole contracts**, long
+REST API v3, CME Group futures (the size named in `TRADER_ALLOWED_SYMBOLS`) in **whole contracts**, long
 and short. There is no fractional trading, so no dust positions.
 
 **Credentials.** Set `IRONBEAM_API_KEY`, `IRONBEAM_USERNAME` (the trader id, e.g.
@@ -309,13 +309,16 @@ more than `IRONBEAM_ROLL_DAYS` from expiry, the one with the most open interest
 (so silver trades December, not a thin November delivery month), cached per day.
 While the account holds a contract, that one is traded until flat.
 
-**Sizing.** Every order is at least one contract (≈ $37k for one MES or MGC,
-≈ $45k for one SIL at late-2026 prices), whatever `TRADER_DAILY_START_CAPITAL`
+**Sizing.** Every order is at least one contract (≈ $35k for one MES, ≈ $350k
+for one ES or GC, ≈ $200k for one SI at late-2026 prices), whatever `TRADER_DAILY_START_CAPITAL`
 says. Repeated signals in one direction add a contract per interval per symbol,
 and each contract ties up margin. On a small account use a long interval
 (`TRADER_EXECUTION_INTERVAL_MINUTES=30`–`60`) and few symbols.
-`IRONBEAM_USE_MICROS=false` trades full-size contracts (10× larger) and only
-suits large accounts.
+The contract size is the one you name in `TRADER_ALLOWED_SYMBOLS`: `MES`,
+`MNQ`, `MYM` or `M2K` trade micros; `ES`, `NQ`, `YM`, `RTY` and any other name
+(`SPY`, `S&P500`, `GC`, …) trade full-size contracts, 10× larger, which only
+suit large accounts. An empty list trades every symbol full size. Naming both
+sizes of one product (`ES,MES`) stops the bot at startup.
 
 **Order checks.** Ironbeam can reject an order without saying why, so the broker
 logs read-only checks (set `IRONBEAM_DIAGNOSTICS=false` to turn them off; they

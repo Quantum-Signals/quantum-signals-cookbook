@@ -18,8 +18,8 @@ owning its broker SDK:
 
 ## Ironbeam: futures in whole contracts
 
-`IronbeamBroker` trades CME Group futures (micros by default: an `ES` signal
-trades the `MES` contract month, e.g. `XCME:MES.Z26`) in whole contracts, long
+`IronbeamBroker` trades CME Group futures (the size named in `TRADER_ALLOWED_SYMBOLS`: `MES` trades the `MES` contract
+month, e.g. `XCME:MES.Z26`, and `ES` the full-size `ES`) in whole contracts, long
 and short. It sets `supports_fractional = False`, so the strategy rounds every
 slice to at least one contract: no reserve and no dust. Notional is
 `qty × price × contract multiplier` (MES = $5 per point), with the multiplier
@@ -101,7 +101,7 @@ that catalog:
 |-----|----------|---------|
 | `INSTRUMENTS` / `canonicalize()` | `qs_trader_symbols` | QS alias → canonical key (`ES`, `NQ`, …) |
 | `AlpacaBroker.DEFAULT_SYMBOL_MAP` | built via `alpaca_symbol_map()` | QS alias → tradable ETF/stock ticker |
-| `IronbeamBroker.DEFAULT_SYMBOL_MAP` | built via `ironbeam_symbol_map()` | QS alias → futures root (`ES` → `MES`, or `ES` with `IRONBEAM_USE_MICROS=false`); the contract month is resolved at runtime. AAPL is omitted |
+| `IronbeamBroker.DEFAULT_SYMBOL_MAP` | built via `ironbeam_symbol_map()` | QS alias → futures root (`ES`, or `MES` when `TRADER_ALLOWED_SYMBOLS` names `MES`); the contract month is resolved at runtime. AAPL is omitted |
 | `SimulatedBroker.DEFAULT_SYMBOL_MAP` | built via `simulated_symbol_map()` | Dry-run contract shapes; `.DEFAULT_PRICES` seeds quotes |
 
 Each broker accepts an optional `symbol_map` (and the simulator, `sim_prices`)

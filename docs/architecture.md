@@ -208,7 +208,7 @@ Broker-specific quirks worth knowing here:
 | Class | Notes |
 |-------|-------|
 | `AlpacaBroker` | Contract = ticker string; equities/ETFs only (futures rejected); HTTP timeouts on `requests.Session` |
-| `IronbeamBroker` | Contract = `IronbeamContract(exch_sym="XCME:MES.Z26", root="MES")`. Contract month = the listed contract with the most open interest among those more than `IRONBEAM_ROLL_DAYS` from expiry (`securityDefinitions` + `quotes`), cached per day; a held contract is traded until flat. Whole contracts, netting account, `FAST_ORDER` MARKET/DAY, fill polled via `GET /order/{id}`. Never calls `/auth/logout` (it revokes every session of the login) |
+| `IronbeamBroker` | Contract = `IronbeamContract(exch_sym="XCME:MES.Z26", root="MES")`. Contract month = the listed contract with the most open interest among those more than `IRONBEAM_ROLL_DAYS` from expiry (`securityDefinitions` + `quotes`), cached per day; a held contract is traded until flat. Other held months of a product are reported and closed under their own symbol (`XCME:MES.H27`). A failed lookup is tried again at the next signal. Whole contracts, netting account, `FAST_ORDER` MARKET/DAY, fill polled via `GET /order/{id}`. Working orders are cancelled in batches of 20 (`/order/cancel`) and confirmed against `/order/updates`. Never calls `/auth/logout` (it revokes every session of the login) |
 | `SimulatedBroker` | Jittered seed prices (`SIM_PRICE_JITTER`, `0` = deterministic); no external broker |
 
 ### Strategies (`src/trader/strategy/`)
@@ -256,7 +256,7 @@ QuantumSignals emits objects consumed by `handle_signal(signal)`.
 
 Defined in `qs_trader_symbols`. Each broker builds its tradable map from that catalog (see [brokers.md § Symbol maps](brokers.md#symbol-maps)).
 
-Ironbeam (`TRADER_BROKER=ironbeam`) trades the futures themselves: `ES` → `MES`, `NQ` → `MNQ`, `YM` → `MYM`, `RTY` → `M2K`, `CL` → `MCL`, `GC` → `MGC`, `SI` → `SIL`, `NG` → `NG` (no micro), with full-size roots when `IRONBEAM_USE_MICROS=false`. Positions are keyed by root, so `contract_multipliers` (MES = 5, MCL = 100, …) apply directly. AAPL has no futures root and is skipped.
+Ironbeam (`TRADER_BROKER=ironbeam`) trades the futures themselves, in the size named in `TRADER_ALLOWED_SYMBOLS`: `MES`, `MNQ`, `MYM`, `M2K` trade micros; `ES`, `NQ`, `YM`, `RTY`, `CL`, `GC`, `SI`, `NG` and other names trade full-size roots. Positions are keyed by root, so `contract_multipliers` (MES = 5, MCL = 100, …) apply directly. AAPL has no futures root and is skipped.
 
 Set `TRADER_ALLOWED_SYMBOLS` using **any alias** for an instrument (`ES`, `SPY`, or `S&P500` all select the same product). Empty = allow the full catalog.
 

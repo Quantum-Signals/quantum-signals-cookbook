@@ -27,8 +27,14 @@ _MAX_RETRY_AFTER_S = 10.0
 _NETWORK_RETRY_WAIT_S = 2.0
 # An empty position list is re-read this often while the account shows margin in use.
 _EMPTY_POSITIONS_READS = 3
+# Ironbeam answers an order within 30 s. Giving up earlier leaves its outcome unknown.
+_ORDER_TIMEOUT_S = 35.0
+# /order/cancel accepts at most 20 orders per call.
+_CANCEL_BATCH = 20
 
 _FAILED_STATUSES = frozenset({"REJECTED", "CANCELED", "EXPIRED", "STOPPED", "SUSPENDED", "DONE_FOR_DAY"})
+# The ones after which nothing more can fill.
+_FINAL_STATUSES = frozenset({"REJECTED", "CANCELED", "EXPIRED"})
 
 
 class IronbeamError(RuntimeError):
@@ -85,13 +91,34 @@ def candidate_symbols(root: str, today: date, months: int = _LOOKAHEAD_MONTHS) -
     return out
 
 
+def _symbol_map_for(allowed_symbols: str) -> dict[str, str]:
+    """QS alias → product root: full size, except instruments named by their micro root."""
+    roots = ironbeam_symbol_map(use_micros=False)
+    micros = ironbeam_symbol_map(use_micros=True)
+    names = {s.strip() for s in allowed_symbols.split(",") if s.strip()}
+    for name in names:
+        canon = canonicalize(name)
+        if canon is None or micros.get(canon) != name:
+            continue
+        if roots[canon] in names or canon in names:
+            raise RuntimeError(
+                f"TRADER_ALLOWED_SYMBOLS names both {canon} and {name}: keep one "
+                f"({name} trades the micro, {canon} full size)"
+            )
+        for alias in roots:
+            if canonicalize(alias) == canon:
+                roots[alias] = name
+    return roots
+
+
 class IronbeamBroker(BrokerBase):
     """Broker backed by the Ironbeam REST API v3 (CME Group futures).
 
-    Each QuantumSignals instrument maps to a futures product root (micro by
-    default: ``ES`` → ``MES``). The contract month is resolved at runtime: of
+    Each QuantumSignals instrument maps to a futures product root, the size
+    the user named: ``MES`` trades micros, ``ES`` full size. The contract
+    month is resolved at runtime: of
     the listed contracts more than ``IRONBEAM_ROLL_DAYS`` from expiry, the one
-    with the most open interest (the earliest if quotes are unavailable),
+    with the most open interest (the earliest if none is published),
     cached for the day. While the account holds a position in a root,
     that held contract is traded instead, so a roll never leaves a stray leg in
     the old month (the EOD flatten closes it, and the next day picks the new
@@ -117,9 +144,7 @@ class IronbeamBroker(BrokerBase):
     ) -> None:
         self._settings = settings if settings is not None else IronbeamSettings()
         self._symbol_map = (
-            symbol_map
-            if symbol_map is not None
-            else ironbeam_symbol_map(use_micros=self._settings.use_micros)
+            symbol_map if symbol_map is not None else _symbol_map_for(self._settings.allowed_symbols)
         )
         self._exchanges = ironbeam_root_exchanges()
         self._session = session
@@ -134,6 +159,8 @@ class IronbeamBroker(BrokerBase):
         self._front: dict[str, tuple[date, Optional[IronbeamContract]]] = {}
         # root → contract currently held, refreshed on every positions read.
         self._held: dict[str, IronbeamContract] = {}
+        # Contracts held besides the one in ``_held``, when a product has several months.
+        self._other_months: set[str] = set()
         # exch_sym → signed contracts: last positions read plus our own fills since.
         self._known_positions: Optional[dict[str, float]] = None
         self._diag: Optional[Diagnostics] = Diagnostics(self) if self._settings.diagnostics else None
@@ -148,7 +175,7 @@ class IronbeamBroker(BrokerBase):
         path: str,
         *,
         params: Optional[dict] = None,
-        body: Optional[dict] = None,
+        body: Any = None,
         auth: bool = True,
         timeout: Optional[float] = None,
         network_retry: bool = True,
@@ -263,10 +290,7 @@ class IronbeamBroker(BrokerBase):
             "[Ironbeam] Live and simulated accounts run on separate hosts with separate keys; "
             f"orders on this key go to {self._base}."
         )
-        logger.info(
-            f"[Ironbeam] Trading {'micro' if self._settings.use_micros else 'full-size'} "
-            "futures in whole contracts"
-        )
+        logger.info("[Ironbeam] Trading futures in whole contracts, the size named in TRADER_ALLOWED_SYMBOLS")
         if self._diag is not None:
             self._diag.account_check()
 
@@ -306,7 +330,7 @@ class IronbeamBroker(BrokerBase):
     def resolve_contract(self, qs_symbol: str) -> Optional[IronbeamContract]:
         """Return the contract to trade for *qs_symbol*, or ``None`` when Ironbeam has none.
 
-        QS aliases map to a product root (``ES`` → ``MES``); instruments with no
+        QS aliases map to a product root (``ES``, or ``MES`` if named); instruments with no
         futures root (``AAPL``) return ``None``. A position symbol the broker
         reported (a root such as ``MES``) returns the held contract, so the EOD
         flatten closes exactly what is open. An explicit contract
@@ -337,7 +361,12 @@ class IronbeamBroker(BrokerBase):
         if cached is not None and cached[0] == today:
             return cached[1]
 
-        contract = self._lookup_front_month(root, today)
+        try:
+            contract = self._lookup_front_month(root, today)
+        except (IronbeamError, requests.RequestException) as exc:
+            # Not remembered: the next signal tries again.
+            logger.warning(f"[Ironbeam] Contract lookup for {root} failed: {exc}")
+            return None
         self._front[root] = (today, contract)
         if contract is not None:
             logger.info(f"[Ironbeam] {root} front month → {contract.exch_sym}")
@@ -350,13 +379,7 @@ class IronbeamBroker(BrokerBase):
         definitions: list[dict] = []
         for i in range(0, len(candidates), _DEFS_BATCH):
             batch = candidates[i : i + _DEFS_BATCH]
-            try:
-                payload = self._request(
-                    "GET", "/reference/securityDefinitions", params={"symbols": ",".join(batch)}
-                )
-            except IronbeamError as exc:
-                logger.warning(f"[Ironbeam] Contract lookup for {root} failed: {exc}")
-                continue
+            payload = self._request("GET", "/reference/securityDefinitions", params={"symbols": ",".join(batch)})
             definitions.extend(payload.get("securityDefinitions") or [])
 
         preferred = self._exchanges.get(root)
@@ -394,15 +417,11 @@ class IronbeamBroker(BrokerBase):
         energy list every month, and the nearest can be a thin delivery month
         (silver's November with a few lots a day while December trades tens of
         thousands). Open interest marks the active month. Falls back to the
-        earliest month when quotes are unavailable.
+        earliest month when no open interest is published.
         """
         if len(months) == 1:
             return months[0]
-        try:
-            payload = self._request("GET", "/market/quotes", params={"symbols": ",".join(months)})
-        except IronbeamError as exc:
-            logger.warning(f"[Ironbeam] Open interest lookup failed ({exc}); using {months[0]}")
-            return months[0]
+        payload = self._request("GET", "/market/quotes", params={"symbols": ",".join(months)})
         open_interest = {
             str(q.get("exchSym")): float(q.get("openInterest") or 0)
             for q in payload.get("quotes") or []
@@ -424,7 +443,7 @@ class IronbeamBroker(BrokerBase):
             if self._symbol_map.get(canon) is None:
                 warnings.append(f"{canon} is not a futures product on Ironbeam")
             elif self.resolve_contract(canon) is None:
-                warnings.append(f"{canon}: no listed {self._symbol_map[canon]} contract on Ironbeam")
+                warnings.append(f"{canon}: no {self._symbol_map[canon]} contract found on Ironbeam")
         if self._diag is not None:
             contracts = [c for c in map(self.resolve_contract, canonical_symbols) if c is not None]
             warnings.extend(self._diag.contract_check([c.exch_sym for c in contracts]))
@@ -466,6 +485,7 @@ class IronbeamBroker(BrokerBase):
         price: Optional[float] = None,
         position_intent: Optional[str] = None,
     ) -> Optional[OrderResult]:
+        self.last_order_not_placed = True  # until it is sent
         side = action.upper()
         if side not in {"BUY", "SELL"}:
             logger.error(f"[Ironbeam] Unknown order action {action!r}")
@@ -493,9 +513,14 @@ class IronbeamBroker(BrokerBase):
         cl_ord_id = f"qs-{uuid.uuid4().hex[:16]}"
         body = {"orderType": "FAST_ORDER", "clOrdId": cl_ord_id, "legs": [leg]}
 
+        self.last_order_not_placed = False
         try:
-            payload = self._request("POST", "/order/place", body=body)
+            payload = self._request(
+                "POST", "/order/place", body=body, timeout=max(_ORDER_TIMEOUT_S, self._settings.http_timeout_s)
+            )
         except IronbeamError as exc:
+            # Ironbeam places nothing when it answers 4xx; 408 and 409 are not certain.
+            self.last_order_not_placed = 400 <= exc.status < 500 and exc.status not in (408, 409)
             if exc.status in (500, 502, 503, 504):
                 self._known_positions = None  # it may have filled
                 logger.error(
@@ -565,6 +590,7 @@ class IronbeamBroker(BrokerBase):
                         f"[Ironbeam] Order {order_id} {status} after filling {filled:g} of {quantity}: {reason}"
                     )
                     return _result(order_id, contract, side, filled, avg, "partially_filled", leg)
+                self.last_order_not_placed = status in _FINAL_STATUSES
                 logger.error(f"[Ironbeam] Order {order_id} {status}: {reason}")
                 self._log_margin_snapshot()
                 if self._diag is not None and check is not None and status == "REJECTED":
@@ -592,6 +618,28 @@ class IronbeamBroker(BrokerBase):
             status=str(leg.get("status") or "submitted").lower(),
             raw=leg or None,
         )
+
+    def cancel_working_orders(self) -> bool:
+        working = self._working_orders()
+        for i in range(0, len(working), _CANCEL_BATCH):
+            batch = working[i : i + _CANCEL_BATCH]
+            logger.warning(f"[Ironbeam] Cancelling working order(s) {', '.join(batch)}")
+            try:
+                self._request("POST", "/order/cancel", body=[{"orderId": order_id} for order_id in batch])
+            except IronbeamError as exc:  # e.g. it just filled; the list below decides
+                logger.warning(f"[Ironbeam] Cancel failed: {exc}")
+        # An accepted cancel takes effect later, so wait until the orders are gone.
+        deadline = self._clock() + self._settings.fill_timeout_s
+        while working and self._clock() < deadline:
+            self._sleep(_POLL_INTERVAL_S)
+            working = self._working_orders()
+        return not working
+
+    def _working_orders(self) -> list[str]:
+        payload = self._request(
+            "GET", "/order/updates", params={"accountId": self._account_id, "orderState": "ACTIVE"}
+        )
+        return [str(order["orderId"]) for order in payload.get("orders") or []]
 
     def _reread_rejection(self, order_id: str, leg: dict, order: dict) -> tuple[dict, dict]:
         """Read a rejected order once more: its ``statusMsg`` can arrive a moment later."""
@@ -702,70 +750,60 @@ class IronbeamBroker(BrokerBase):
             200, f"positions came back empty while ${margin:,.0f} of margin is in use, so they cannot be trusted"
         )
 
-    def _net_positions(self) -> dict[str, dict]:
-        rows = self._confirmed_positions()
-        by_root: dict[str, list[tuple[str, float, float, float]]] = {}
-        known: dict[str, float] = {}
-        for p in rows:
-            exch_sym = str(p.get("exchSym") or "")
-            qty = float(p.get("quantity") or 0.0)
+    def _positions(self) -> dict[str, dict]:
+        """Open positions by symbol.
+
+        A product's contract goes by its root (``MES``). Normally there is one;
+        any other month is listed, and closed, under its own symbol
+        (``XCME:MES.H27``), which it keeps until it is flat.
+        """
+        by_contract: dict[str, dict] = {}
+        for p in self._confirmed_positions():
+            exch_sym, qty = str(p.get("exchSym") or ""), float(p.get("quantity") or 0.0)
             if not exch_sym or qty <= 0:
                 continue
-            signed = -qty if str(p.get("side", "")).upper() == "SHORT" else qty
-            known[exch_sym] = known.get(exch_sym, 0.0) + signed
-            by_root.setdefault(root_of(exch_sym), []).append(
-                (exch_sym, signed, float(p.get("price") or 0.0), float(p.get("unrealizedPL") or 0.0))
+            position = by_contract.setdefault(
+                exch_sym, {"qty": 0.0, "avg_price": float(p.get("price") or 0.0), "unreal_pnl": 0.0}
             )
+            position["qty"] += -qty if str(p.get("side", "")).upper() == "SHORT" else qty
+            position["unreal_pnl"] += float(p.get("unrealizedPL") or 0.0)
+        self._known_positions = {exch_sym: position["qty"] for exch_sym, position in by_contract.items()}
 
-        nets: dict[str, dict] = {}
-        held: dict[str, IronbeamContract] = {}
-        for root, lots in by_root.items():
-            # Normally one contract per root. During a roll there can be two:
-            # report the net, and trade/close the larger one.
-            main = max(lots, key=lambda lot: abs(lot[1]))
-            if len(lots) > 1:
-                logger.warning(
-                    f"[Ironbeam] Account holds {root} in {len(lots)} contracts "
-                    f"({', '.join(lot[0] for lot in lots)}). Reporting the net and trading "
-                    f"{main[0]}; close the others by hand."
-                )
-            nets[root] = {
-                "qty": sum(lot[1] for lot in lots),
-                "avg_price": main[2],
-                "unreal_pnl": sum(lot[3] for lot in lots),
-            }
-            held[root] = IronbeamContract(exch_sym=main[0], root=root)
-        self._held = held
-        self._known_positions = known
-        return nets
+        traded = {contract.exch_sym for contract in self._held.values()}
+        self._other_months &= by_contract.keys()
+        self._held = {}
+        positions: dict[str, dict] = {}
+        # The month being traded comes first, then the largest.
+        for exch_sym, position in sorted(
+            by_contract.items(), key=lambda item: (item[0] not in traded, -abs(item[1]["qty"]))
+        ):
+            root = root_of(exch_sym)
+            if root in self._held or exch_sym in self._other_months:
+                self._other_months.add(exch_sym)
+                positions[exch_sym] = position
+            else:
+                self._held[root] = IronbeamContract(exch_sym=exch_sym, root=root)
+                positions[root] = position
+        return positions
 
     def get_open_positions(self) -> list[dict]:
         return [
-            {
-                "symbol": root,
-                "pos": net["qty"],
-                "avg_cost": net["avg_price"],
-                "unreal_pnl": net["unreal_pnl"],
-            }
-            for root, net in self._net_positions().items()
+            {"symbol": symbol, "pos": p["qty"], "avg_cost": p["avg_price"], "unreal_pnl": p["unreal_pnl"]}
+            for symbol, p in self._positions().items()
         ]
 
     def get_positions_for_sync(self) -> list[dict]:
-        rows = []
-        for root, net in self._net_positions().items():
-            qty = net["qty"]
-            if abs(qty) <= 1e-12:
-                continue
-            rows.append(
-                {
-                    "symbol": root,
-                    "qty": qty,
-                    "qty_available": abs(qty),
-                    "side": "long" if qty > 0 else "short",
-                    "avg_price": net["avg_price"],
-                }
-            )
-        return rows
+        return [
+            {
+                "symbol": symbol,
+                "qty": p["qty"],
+                "qty_available": abs(p["qty"]),
+                "side": "long" if p["qty"] > 0 else "short",
+                "avg_price": p["avg_price"],
+            }
+            for symbol, p in self._positions().items()
+            if abs(p["qty"]) > 1e-12
+        ]
 
 
 def _given_reason(leg: dict, order: dict) -> str:

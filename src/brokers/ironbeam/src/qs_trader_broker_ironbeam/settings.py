@@ -17,7 +17,7 @@ class IronbeamSettings(BaseSettings):
     environment in the onboarding material.
     """
 
-    model_config = SettingsConfigDict(env_prefix="IRONBEAM_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="IRONBEAM_", extra="ignore", populate_by_name=True)
 
     api_key: str = ""
     username: str = ""
@@ -27,8 +27,9 @@ class IronbeamSettings(BaseSettings):
     account_id: str = ""
     # Host only, no /v3 suffix: the broker adds the version prefix itself.
     base_url: str = "https://api.ironbeamapi.com"
-    # Trade micro contracts (MES, MNQ, …) instead of full-size ones (ES, NQ, …).
-    use_micros: bool = True
+    # The trader's symbol list, read here to pick the contract size: a micro
+    # name (MES, MNQ, …) trades the micro, any other name (ES, NQ, …) full size.
+    allowed_symbols: str = Field(default="", validation_alias="TRADER_ALLOWED_SYMBOLS")
     use_market_orders: bool = True
     # Skip a contract once it is this close to expiry and use the next one.
     roll_days: int = Field(default=5, ge=0)

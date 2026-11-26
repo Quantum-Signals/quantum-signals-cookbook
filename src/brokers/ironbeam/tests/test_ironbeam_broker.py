@@ -6,7 +6,7 @@ import pytest
 import requests
 
 from qs_trader_broker_ironbeam import IronbeamBroker, IronbeamContract, IronbeamSettings
-from qs_trader_broker_ironbeam.broker import IronbeamError, candidate_symbols, root_of
+from qs_trader_broker_ironbeam.broker import IronbeamError, _symbol_map_for, candidate_symbols, root_of
 
 BASE = "https://ib.test"
 # 2026-11-18 12:00 local; MES.Z26 expires 2026-12-18.
@@ -21,7 +21,7 @@ def _settings(**overrides) -> IronbeamSettings:
         password="pw",
         account_id="",
         base_url=BASE,
-        use_micros=True,
+        allowed_symbols="MES,MNQ",
         use_market_orders=True,
         roll_days=5,
         fill_timeout_s=2.0,
@@ -48,6 +48,7 @@ class FakeIronbeam:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict | None, dict | None]] = []
+        self.timeouts: dict[str, float] = {}  # by path
         self.accounts = ["ACC1"]
         self.positions: list[dict] = []
         self.quotes = {"XCME:MES.Z26": {"exchSym": "XCME:MES.Z26", "last": 6800.25, "bid": 6800.0, "ask": 6800.5}}
@@ -68,11 +69,17 @@ class FakeIronbeam:
         self.start_as_of = NOW
         # Reason on a REJECTED leg: one for every read, or one per read.
         self.reject_msg: str | None | list = "Insufficient margin"
+        # Working order ids, and how many reads a cancelled one stays listed.
+        self.working: list[str] = []
+        self.cancel_reads = 1
+        self.cancel_error: int | None = None
+        self.cancelled: list[list[str]] = []
 
     def request(self, method, url, params=None, json=None, headers=None, timeout=None):
         assert url.startswith(f"{BASE}/v3/"), url
         path = url[len(BASE) + 3 :]
         self.calls.append((method, path, params, json))
+        self.timeouts[path] = timeout
         if self.raise_next:
             raise self.raise_next.pop(0)
         if self.next_status:
@@ -81,7 +88,12 @@ class FakeIronbeam:
             assert headers["Authorization"].startswith("Bearer tok"), headers
         handler = getattr(self, f"_{method.lower()}_{path.strip('/').split('/')[0]}_{path.strip('/').split('/')[1] if '/' in path.strip('/') else ''}", None)
         if path == "/order/updates":
-            return FakeResponse(200, {"status": "OK", "orders": []})
+            assert params == {"accountId": "ACC1", "orderState": "ACTIVE"}
+            if self.cancelled and not self.cancel_error:
+                if self.cancel_reads == 0:
+                    self.working = []
+                self.cancel_reads -= 1
+            return FakeResponse(200, {"status": "OK", "orders": [{"orderId": i, "legs": []} for i in self.working]})
         if path.startswith("/order/") and method == "GET":
             return self._get_order(path.rsplit("/", 1)[-1])
         assert handler is not None, (method, path)
@@ -175,6 +187,12 @@ class FakeIronbeam:
             return self.place_response
         return FakeResponse(201, {"status": "OK", "result": "ERROR_NONE", "orderId": "987"})
 
+    def _post_order_cancel(self, params, body):
+        self.cancelled.append([c["orderId"] for c in body])
+        if self.cancel_error:
+            return FakeResponse(self.cancel_error, {"status": "ERROR", "message": "no"})
+        return FakeResponse(200, {"orders": [{"status": "OK"} for _ in body]})
+
     def _get_order(self, order_id):
         status = self.order_status.pop(0) if len(self.order_status) > 1 else self.order_status[0]
         if status == "404":
@@ -224,6 +242,23 @@ def _broker(api, **overrides) -> IronbeamBroker:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def test_contract_size_follows_the_symbol_list():
+    m = _symbol_map_for("MES,NQ,GC")
+    assert (m["ES"], m["SPY"], m["MES"]) == ("MES", "MES", "MES")
+    assert (m["NQ"], m["MNQ"], m["GC"]) == ("NQ", "NQ", "GC")
+    assert _symbol_map_for("")["ES"] == "ES"
+
+
+def test_symbol_list_naming_both_sizes_is_refused():
+    with pytest.raises(RuntimeError, match="both ES and MES"):
+        _symbol_map_for("ES,MES")
+
+
+def test_settings_read_the_trader_symbol_list(monkeypatch):
+    monkeypatch.setenv("TRADER_ALLOWED_SYMBOLS", "MES,GC")
+    assert IronbeamSettings().allowed_symbols == "MES,GC"
 
 
 def test_root_of_strips_exchange_and_month():
@@ -306,9 +341,9 @@ def test_resolve_maps_qs_aliases_to_micro_front_month(api):
 
 
 def _silver(api, nov_oi, dec_oi):
-    api.expiries["XCME:SIL.X26"] = datetime(2026, 11, 25, 12, 0).timestamp() * 1000
-    api.expiries["XCME:SIL.Z26"] = datetime(2026, 12, 29, 12, 0).timestamp() * 1000
-    for sym, oi in (("XCME:SIL.X26", nov_oi), ("XCME:SIL.Z26", dec_oi)):
+    api.expiries["XCME:SI.X26"] = datetime(2026, 11, 25, 12, 0).timestamp() * 1000
+    api.expiries["XCME:SI.Z26"] = datetime(2026, 12, 29, 12, 0).timestamp() * 1000
+    for sym, oi in (("XCME:SI.X26", nov_oi), ("XCME:SI.Z26", dec_oi)):
         if oi is not None:
             api.quotes[sym] = {"exchSym": sym, "last": 45.0, "openInterest": oi}
 
@@ -316,24 +351,24 @@ def _silver(api, nov_oi, dec_oi):
 def test_resolve_picks_most_open_interest_over_thin_nearby_month(api):
     _silver(api, nov_oi=522, dec_oi=21_831)
     broker = _broker(api)
-    assert broker.resolve_contract("SI") == IronbeamContract("XCME:SIL.Z26", "SIL")
+    assert broker.resolve_contract("SI") == IronbeamContract("XCME:SI.Z26", "SI")
 
 
 def test_resolve_keeps_nearby_month_while_it_has_more_open_interest(api):
     _silver(api, nov_oi=30_000, dec_oi=5_000)
     broker = _broker(api)
-    assert broker.resolve_contract("SI").exch_sym == "XCME:SIL.X26"
+    assert broker.resolve_contract("SI").exch_sym == "XCME:SI.X26"
 
 
 def test_resolve_falls_back_to_earliest_without_open_interest(api):
     _silver(api, nov_oi=None, dec_oi=None)
     broker = _broker(api)
-    assert broker.resolve_contract("SI").exch_sym == "XCME:SIL.X26"
+    assert broker.resolve_contract("SI").exch_sym == "XCME:SI.X26"
 
 
-def test_resolve_full_size_roots_when_micros_off(api):
+def test_resolve_full_size_roots_when_named(api):
     api.expiries["XCME:ES.Z26"] = api.expiries["XCME:MES.Z26"]
-    broker = _broker(api, use_micros=False)
+    broker = _broker(api, allowed_symbols="ES")
     assert broker.resolve_contract("ES") == IronbeamContract("XCME:ES.Z26", "ES")
 
 
@@ -362,7 +397,7 @@ def test_startup_warnings_name_unsupported_symbols(api):
     broker = _broker(api)
     warnings = broker.startup_entitlement_warnings(["ES", "AAPL", "GC"])
     assert any("AAPL" in w and "not a futures" in w for w in warnings)
-    assert any(w.startswith("GC:") and "MGC" in w for w in warnings)
+    assert any(w.startswith("GC:") and "GC contract" in w for w in warnings)
     assert not any(w.startswith("ES") for w in warnings)
 
 
@@ -521,15 +556,49 @@ def test_positions_are_signed_and_keyed_by_root(api):
     assert open_rows["MES"] == {"symbol": "MES", "pos": -3.0, "avg_cost": 6810.0, "unreal_pnl": 15.0}
 
 
-def test_two_contracts_of_one_root_report_net_and_trade_larger(api):
-    api.positions = [
-        {"exchSym": "XCME:MES.Z26", "quantity": 1.0, "side": "LONG", "price": 6800.0},
-        {"exchSym": "XCME:MES.H27", "quantity": 3.0, "side": "LONG", "price": 6900.0},
-    ]
+def _lot(symbol, quantity, side="LONG", price=6800.0):
+    return {"exchSym": f"XCME:{symbol}", "quantity": quantity, "side": side, "price": price}
+
+
+def _held(broker):
+    return {p["symbol"]: p["qty"] for p in broker.get_positions_for_sync()}
+
+
+def test_each_month_of_a_product_is_reported_on_its_own(api):
+    api.positions = [_lot("MES.Z26", 1.0), _lot("MES.H27", 3.0, price=6900.0)]
     broker = _broker(api)
-    (row,) = broker.get_positions_for_sync()
-    assert row["qty"] == 4.0 and row["avg_price"] == 6900.0
-    assert broker.resolve_contract("ES").exch_sym == "XCME:MES.H27"
+    assert _held(broker) == {"MES": 3.0, "XCME:MES.Z26": 1.0}
+    assert broker.resolve_contract("ES").exch_sym == "XCME:MES.H27"  # the larger one is traded
+    assert broker.resolve_contract("MES").exch_sym == "XCME:MES.H27"
+    assert broker.resolve_contract("XCME:MES.Z26").exch_sym == "XCME:MES.Z26"
+    assert {p["symbol"]: p["pos"] for p in broker.get_open_positions()} == _held(broker)
+
+
+def test_opposite_months_do_not_look_flat(api):
+    api.positions = [_lot("MES.Z26", 3.0), _lot("MES.H27", 3.0, "SHORT")]
+    assert _held(_broker(api)) == {"MES": 3.0, "XCME:MES.H27": -3.0}
+
+
+def test_traded_month_does_not_change_when_a_larger_one_appears(api):
+    api.positions = [_lot("MES.Z26", 1.0)]
+    broker = _broker(api)
+    assert _held(broker) == {"MES": 1.0}
+    api.positions.append(_lot("MES.H27", 5.0))  # e.g. bought by hand
+    assert _held(broker) == {"MES": 1.0, "XCME:MES.H27": 5.0}
+
+
+def test_month_keeps_its_name_while_the_others_close(api):
+    api.positions = [_lot("MES.Z26", 7.0), _lot("MES.H27", 2.0)]
+    broker = _broker(api)
+    assert _held(broker) == {"MES": 7.0, "XCME:MES.H27": 2.0}
+    api.positions = [_lot("MES.Z26", 1.0), _lot("MES.H27", 2.0)]
+    assert _held(broker) == {"MES": 1.0, "XCME:MES.H27": 2.0}
+    api.positions = [_lot("MES.H27", 2.0)]
+    assert _held(broker) == {"XCME:MES.H27": 2.0}
+    api.positions = []
+    assert _held(broker) == {}
+    api.positions = [_lot("MES.H27", 2.0)]  # opened again later
+    assert _held(broker) == {"MES": 2.0}
 
 
 def test_disconnect_does_not_log_out(api):
@@ -705,3 +774,148 @@ def test_closing_orders_are_never_predicted_to_be_rejected():
     assert margin_after(48_000, 3600, +1, "SELL", 3) == (51_600, 2)
     check = OrderCheck("X", "SELL", 2, opening=0, margin_after=60_000, start_cash=50_000)
     assert check.predicted == "accept"
+
+
+# ---------------------------------------------------------------------------
+# What the app needs to close positions safely
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["REJECTED", "CANCELED", "EXPIRED"])
+def test_refused_order_is_reported_as_not_placed(api, status):
+    broker = _broker(api)
+    api.order_status = [status]
+    assert broker.place_order(broker.resolve_contract("ES"), "SELL", 1) is None
+    assert broker.last_order_not_placed
+
+
+@pytest.mark.parametrize(
+    "http, refused", [(400, True), (403, True), (429, True), (408, False), (409, False), (500, False), (503, False)]
+)
+def test_only_a_4xx_answer_to_an_order_is_a_refusal(api, http, refused):
+    broker = _broker(api)
+    api.place_response = FakeResponse(http, {"status": "ERROR", "message": "no"})
+    assert broker.place_order(broker.resolve_contract("ES"), "SELL", 1) is None
+    assert broker.last_order_not_placed is refused
+
+
+def test_order_with_unknown_outcome_is_not_a_refusal(api):
+    broker = _broker(api)
+    contract = broker.resolve_contract("ES")
+    broker.last_order_not_placed = True  # left over from an earlier order
+    api.raise_next = [requests.ReadTimeout("slow")]
+    assert broker.place_order(contract, "SELL", 1) is None
+    assert not broker.last_order_not_placed
+    api.order_status = ["STOPPED"]  # may still execute
+    assert broker.place_order(contract, "SELL", 1) is None
+    assert not broker.last_order_not_placed
+
+
+def test_order_never_sent_is_not_placed(api):
+    broker = _broker(api)
+    assert broker.place_order(broker.resolve_contract("ES"), "SELL", 0.2) is None
+    assert broker.last_order_not_placed and api.placed == []
+
+
+def test_no_working_orders_needs_no_cancel(api):
+    assert _broker(api).cancel_working_orders() and api.cancelled == []
+
+
+def test_working_orders_are_cancelled_in_batches_and_confirmed(api):
+    broker = _broker(api)
+    api.working = [str(i) for i in range(45)]
+    api.cancel_reads = 2  # a cancel is only accepted at first
+    assert broker.cancel_working_orders()
+    assert [len(batch) for batch in api.cancelled] == [20, 20, 5]
+
+
+def test_cancel_that_never_takes_effect_is_not_confirmed(api):
+    broker = _broker(api)
+    api.working, api.cancel_reads = ["1"], 10**6
+    assert not broker.cancel_working_orders()
+
+
+def test_order_that_finished_before_its_cancel_is_confirmed_by_the_list(api):
+    broker = _broker(api)
+    api.working, api.cancel_error = ["1"], 404
+    real = api._post_order_cancel
+
+    def finished(params, body):
+        api.working = []
+        return real(params, body)
+
+    api._post_order_cancel = finished
+    assert broker.cancel_working_orders()
+
+
+def test_refused_cancel_is_not_confirmed(api):
+    broker = _broker(api)
+    api.working, api.cancel_error = ["1"], 403  # e.g. an order the risk service placed
+    assert not broker.cancel_working_orders()
+
+
+@pytest.mark.parametrize("configured, expected", [(5.0, 35.0), (60.0, 60.0)])
+def test_an_order_is_awaited_longer_than_ironbeam_takes_to_answer(api, configured, expected):
+    broker = _broker(api, http_timeout_s=configured)
+    broker.place_order(broker.resolve_contract("ES"), "SELL", 1)
+    assert api.timeouts["/order/place"] == expected  # Ironbeam answers within 30 s
+    assert api.timeouts["/order/987"] == configured
+
+
+# ---------------------------------------------------------------------------
+# A contract lookup that fails is tried again
+# ---------------------------------------------------------------------------
+
+
+def _failing(api, name, failure):
+    """Make one read fail until the returned function is called."""
+    real = getattr(api, name)
+
+    def fail(params, body):
+        if isinstance(failure, Exception):
+            raise failure
+        return FakeResponse(failure, {"status": "ERROR", "message": "boom"})
+
+    setattr(api, name, fail)
+    return lambda: setattr(api, name, real)
+
+
+@pytest.mark.parametrize("failure", [500, requests.ReadTimeout("slow"), requests.ConnectionError("down")])
+@pytest.mark.parametrize("read", ["_get_reference_securityDefinitions", "_get_market_quotes"])
+def test_failed_lookup_skips_the_symbol_only_until_the_next_try(api, read, failure):
+    api.quotes["XCME:MES.Z26"]["openInterest"] = 5
+    api.quotes["XCME:MES.H27"] = {"exchSym": "XCME:MES.H27", "last": 6900.0, "openInterest": 9}
+    broker = _broker(api)
+    recover = _failing(api, read, failure)
+    assert broker.resolve_contract("ES") is None
+    recover()
+    assert broker.resolve_contract("ES").exch_sym == "XCME:MES.H27"
+
+
+def test_one_failed_batch_does_not_pick_from_the_others(api):
+    api.next_status = []
+    broker = _broker(api)
+    real = api._get_reference_securityDefinitions
+    calls: list = []
+
+    def first_batch_fails(params, body):
+        calls.append(1)
+        return FakeResponse(500, {"status": "ERROR"}) if len(calls) == 1 else real(params, body)
+
+    api._get_reference_securityDefinitions = first_batch_fails
+    api.expiries["XCME:MES.U27"] = datetime(2027, 9, 17).timestamp() * 1000
+    assert broker.resolve_contract("ES") is None
+    assert broker.resolve_contract("ES").exch_sym == "XCME:MES.Z26"
+
+
+def test_product_that_is_not_listed_is_looked_up_once_a_day(api):
+    broker = _broker(api)
+    assert broker.resolve_contract("GC") is None
+    before = len(api.calls)
+    assert broker.resolve_contract("GC") is None and len(api.calls) == before
+
+
+def test_startup_survives_a_failed_lookup(api):
+    broker = _broker(api, diagnostics=True)
+    _failing(api, "_get_reference_securityDefinitions", requests.ReadTimeout("slow"))
+    assert any("ES" in w for w in broker.startup_entitlement_warnings(["ES"]))

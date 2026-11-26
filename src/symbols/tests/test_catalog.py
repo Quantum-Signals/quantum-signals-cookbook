@@ -95,7 +95,7 @@ def test_allowed_etf_or_future_name_accepts_other_aliases(instrument):
 
 
 def test_ironbeam_map_uses_micros_by_default():
-    m = ironbeam_symbol_map()
+    m = ironbeam_symbol_map(use_micros=True)
     assert m["ES"] == m["SPY"] == m["S&P500"] == "MES"
     assert m["NQ"] == "MNQ"
     assert m["YM"] == "MYM"
