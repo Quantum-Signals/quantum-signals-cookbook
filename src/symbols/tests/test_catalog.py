@@ -90,3 +90,10 @@ def test_allowed_etf_or_future_name_accepts_other_aliases(instrument):
     assert allowed is not None
     for alias in instrument.aliases:
         assert is_symbol_allowed(alias, allowed)
+
+
+@pytest.mark.parametrize("micro, canonical", [("MCL", "CL"), ("MGC", "GC"), ("SIL", "SI")])
+def test_energy_and_metal_micros_are_recognised(micro, canonical):
+    assert canonicalize(micro) == canonical
+    assert position_symbol_to_canonical(micro) == canonical
+    assert alpaca_symbol_map()[micro] == alpaca_symbol_map()[canonical]

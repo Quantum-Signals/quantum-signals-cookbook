@@ -695,7 +695,10 @@ def format_day_summary(
             f"{total_pnl / daily_start_capital:+.2%}"
         )
     if nlv is not None:
-        lines.append(f"  NLV at flatten            : {_format_currency(float(nlv))}")
+        lines.append(f"  NLV before flatten        : {_format_currency(float(nlv))}")
+    nlv_after = snapshot.get("net_liquidation_after")
+    if nlv_after is not None:
+        lines.append(f"  NLV after flatten         : {_format_currency(float(nlv_after))}")
 
     lines.extend(["", "POSITIONS AT FLATTEN"])
     if positions:

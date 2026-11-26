@@ -65,3 +65,13 @@ def test_day_summary_splits_intraday_and_flatten_closes():
     assert "ES       LONG   PnL=$+20.00" in text
     assert "GLD      SHORT  PnL=$-5.00" in text
     assert "already flat" in text
+
+
+def test_micro_contract_counts_under_its_instrument():
+    perf = PerformanceTracker()
+    perf.record_signal("ES", Signal.DOWN)
+    perf.record_trade("ES", "SHORT", 1)
+    perf.record_close("MES", -10.0, Signal.DOWN)
+    assert list(perf.symbol_stats) == ["ES"]
+    assert perf.symbol_stats["ES"].realized_pnl == -10.0
+    assert perf._trade_log[0]["symbol"] == "MES"  # the closed contract is still named

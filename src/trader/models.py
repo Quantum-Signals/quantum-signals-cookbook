@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Literal
 
+from qs_trader_symbols import position_symbol_to_canonical
+
 
 class Signal(IntEnum):
     DOWN = 0
@@ -73,7 +75,8 @@ class PerformanceTracker:
     decisions_executed: int = 0
 
     def _get_symbol_stats(self, symbol: str) -> SymbolStats:
-        """Get or create per-symbol stats tracker."""
+        """Get or create the stats of *symbol*'s instrument (``MES`` counts as ``ES``)."""
+        symbol = position_symbol_to_canonical(symbol) or symbol
         if symbol not in self.symbol_stats:
             self.symbol_stats[symbol] = SymbolStats()
         return self.symbol_stats[symbol]
